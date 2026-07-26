@@ -1,0 +1,4 @@
+python-telegram-bot>=21.0
+yt-dlp
+python-dotenv>=1.0
+bgutil-ytdlp-pot-provider

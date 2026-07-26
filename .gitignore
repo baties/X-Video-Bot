@@ -1,0 +1,28 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Tooling caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Downloads / temp
+*.mp4
+*.webm
+downloads/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Cookies (secrets!)
+cookies.txt
+*.cookies
