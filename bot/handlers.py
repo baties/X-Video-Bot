@@ -1,6 +1,7 @@
 """Telegram update handlers."""
 
 import logging
+import os
 import tempfile
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -8,6 +9,7 @@ from telegram.constants import ChatAction
 from telegram.ext import ContextTypes
 
 from .config import Settings
+from .transcode import CompressionFailed, CompressionImpossible, compress_to_fit
 from .downloader import (
     PLATFORMS,
     DownloadFailed,
@@ -92,25 +94,57 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await status.edit_text("Something went wrong. Try again later.")
             return
 
+        filepath = result.filepath
+        method_note = ""
+        limit_mb = settings.max_file_size // (1024 * 1024)
+        size_mb = result.size / (1024 * 1024)
+
         if result.size > settings.max_file_size:
+            # Method 2: compress with ffmpeg to fit under the limit
             await status.edit_text(
-                f"Video is larger than {settings.max_file_size // (1024 * 1024)} MB — "
-                "Telegram bots can't send it. Try a shorter video."
+                f"Video is {size_mb:.0f} MB — over Telegram's {limit_mb} MB bot limit.\n"
+                "Method 2: compressing with ffmpeg, this can take a few minutes..."
             )
-            return
+            try:
+                filepath = await compress_to_fit(result.filepath, settings.max_file_size)
+            except CompressionImpossible:
+                await status.edit_text(
+                    f"Video is {size_mb:.0f} MB and too long to compress under "
+                    f"{limit_mb} MB at watchable quality. Can't send it, sorry."
+                )
+                return
+            except CompressionFailed as exc:
+                log.error("Compression failed for %s: %s", url, exc)
+                await status.edit_text(
+                    f"Video is {size_mb:.0f} MB and compression failed. Can't send it."
+                )
+                return
+
+            new_mb = os.path.getsize(filepath) / (1024 * 1024)
+            if os.path.getsize(filepath) > settings.max_file_size:
+                await status.edit_text(
+                    f"Compressed to {new_mb:.0f} MB but still over the {limit_mb} MB limit."
+                )
+                return
+            method_note = f" (compressed {size_mb:.0f} → {new_mb:.0f} MB)"
+            await status.edit_text(f"Compressed to {new_mb:.0f} MB. Uploading...")
+        else:
+            await status.edit_text(
+                f"Downloaded {size_mb:.1f} MB (method 1: direct). Uploading..."
+            )
 
         try:
-            with open(result.filepath, "rb") as fh:
+            with open(filepath, "rb") as fh:
                 await update.message.reply_video(
                     video=fh,
-                    caption=result.title,
+                    caption=(result.title + method_note)[:1024],
                     supports_streaming=True,
                 )
             await status.delete()
         except Exception as exc:
             log.exception("reply_video failed for %s, retrying as document", url)
             try:
-                with open(result.filepath, "rb") as fh:
+                with open(filepath, "rb") as fh:
                     await update.message.reply_document(document=fh, caption=result.title)
                 await status.delete()
             except Exception as exc2:
