@@ -8,7 +8,10 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction
 from telegram.ext import ContextTypes
 
+import time
+
 from .config import Settings
+from .db import Database
 from .transcode import CompressionFailed, CompressionImpossible, compress_to_fit
 from .downloader import (
     PLATFORMS,
@@ -32,7 +35,17 @@ def _menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+async def _register_and_check_ban(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Record the user; returns True if they are banned."""
+    db: Database = context.bot_data["db"]
+    user = update.effective_user
+    await db.upsert_user(user.id, user.username, user.first_name)
+    return await db.is_banned(user.id)
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await _register_and_check_ban(update, context):
+        return
     await update.message.reply_text(
         "Pick a platform, then send me a link — or just send any supported link "
         "and I'll auto-detect it.\nOnly public posts are supported.",
@@ -55,6 +68,10 @@ async def select_platform(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings: Settings = context.bot_data["settings"]
+    db: Database = context.bot_data["db"]
+
+    if await _register_and_check_ban(update, context):
+        return  # banned users are silently ignored
 
     detected = detect_platform(update.message.text or "")
     if not detected:
@@ -65,6 +82,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     platform, url = detected
+    user_id = update.effective_user.id
+
+    if settings.downloads_per_day > 0:
+        used = await db.download_count_since(user_id, int(time.time()) - 86400)
+        if used >= settings.downloads_per_day:
+            await update.message.reply_text(
+                f"Daily limit reached ({settings.downloads_per_day} downloads per 24h). "
+                "Try again later."
+            )
+            return
+
+    await db.record_download(user_id, platform.key, url)
 
     selected = context.user_data.get("platform", ANY_MODE)
     if selected != ANY_MODE and selected != platform.key:

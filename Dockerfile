@@ -14,7 +14,8 @@ COPY main.py .
 COPY bot/ bot/
 
 # Run as non-root
-RUN useradd -m appuser && chown -R appuser /app
+RUN useradd -m appuser && chown -R appuser /app \
+    && mkdir -p /data && chown appuser /data
 USER appuser
 
 CMD ["python", "main.py"]

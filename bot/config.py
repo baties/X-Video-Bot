@@ -18,6 +18,11 @@ class Settings:
     cookies_file: str | None = os.getenv("COOKIES_FILE") or None
     proxy_url: str | None = os.getenv("PROXY_URL") or None
     pot_provider_url: str | None = os.getenv("POT_PROVIDER_URL") or None
+    admin_id: int | None = (
+        int(os.environ["ADMIN_ID"]) if os.getenv("ADMIN_ID") else None
+    )
+    db_path: str = os.getenv("DB_PATH", "bot.db")
+    downloads_per_day: int = int(os.getenv("DOWNLOADS_PER_DAY", "0"))  # 0 = unlimited
 
 
 def get_settings() -> Settings:

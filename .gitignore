@@ -26,3 +26,9 @@ downloads/
 # Cookies (secrets!)
 cookies.txt
 *.cookies
+
+# SQLite data
+data/
+*.db
+*.db-wal
+*.db-shm

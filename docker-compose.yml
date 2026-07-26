@@ -7,6 +7,9 @@ services:
     environment:
       # Point yt-dlp's PO token plugin at the provider container
       POT_PROVIDER_URL: http://pot-provider:4416
+      DB_PATH: /data/bot.db
+    volumes:
+      - ./data:/data
     depends_on:
       - pot-provider
     # Uncomment to mount a cookies file (set COOKIES_FILE=/data/cookies.txt in .env)

@@ -11,7 +11,9 @@ from telegram.ext import (
     filters,
 )
 
+from bot.admin import ban, broadcast, stats, unban
 from bot.config import get_settings
+from bot.db import Database
 from bot.handlers import error_handler, handle_message, select_platform, start
 
 
@@ -32,8 +34,13 @@ def main() -> None:
     )
     app = Application.builder().token(settings.bot_token).request(request).build()
     app.bot_data["settings"] = settings
+    app.bot_data["db"] = Database(settings.db_path)
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("stats", stats))
+    app.add_handler(CommandHandler("ban", ban))
+    app.add_handler(CommandHandler("unban", unban))
+    app.add_handler(CommandHandler("broadcast", broadcast))
     app.add_handler(CallbackQueryHandler(select_platform, pattern=r"^platform:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)
