@@ -89,3 +89,46 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await asyncio.sleep(0.05)  # stay under Telegram's ~30 msg/s flood limit
 
     await status.edit_text(f"Broadcast done: {sent} sent, {failed} failed.")
+
+
+@admin_only
+async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    db: Database = context.bot_data["db"]
+    users = await db.all_users()
+    if not users:
+        await update.message.reply_text("No users yet.")
+        return
+
+    lines = []
+    for u in users:
+        name = f"@{u['username']}" if u["username"] else (u["first_name"] or "-")
+        flag = " [BANNED]" if u["banned"] else ""
+        lines.append(f"{u['user_id']}  {name}{flag}")
+
+    header = f"{len(users)} users:\n"
+    # Telegram messages cap at 4096 chars — send in chunks
+    chunk = header
+    for line in lines:
+        if len(chunk) + len(line) + 1 > 4000:
+            await update.message.reply_text(chunk)
+            chunk = ""
+        chunk += line + "\n"
+    if chunk:
+        await update.message.reply_text(chunk)
+
+
+@admin_only
+async def send(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    args = update.message.text.split(maxsplit=2)
+    if len(args) < 3 or not args[1].lstrip("-").isdigit():
+        await update.message.reply_text("Usage: /send <user_id> <message>")
+        return
+    user_id, text = int(args[1]), args[2]
+    try:
+        await context.bot.send_message(chat_id=user_id, text=text)
+        await update.message.reply_text(f"Sent to {user_id}.")
+    except Exception as exc:
+        await update.message.reply_text(
+            f"Failed to send to {user_id}: {type(exc).__name__} — "
+            "user may have blocked the bot or never started it."
+        )

@@ -36,11 +36,53 @@ def _menu() -> InlineKeyboardMarkup:
 
 
 async def _register_and_check_ban(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Record the user; returns True if they are banned."""
+    """Record the user, notify the admin of new users; returns True if banned."""
     db: Database = context.bot_data["db"]
+    settings: Settings = context.bot_data["settings"]
     user = update.effective_user
-    await db.upsert_user(user.id, user.username, user.first_name)
+
+    is_new = await db.upsert_user(user.id, user.username, user.first_name)
+
+    if is_new and settings.admin_id and user.id != settings.admin_id:
+        name = f"@{user.username}" if user.username else (user.first_name or "-")
+        try:
+            await context.bot.send_message(
+                chat_id=settings.admin_id,
+                text=f"New user: {user.id} ({name})",
+            )
+        except Exception:
+            log.warning("Could not notify admin about new user %s", user.id)
+
     return await db.is_banned(user.id)
+
+
+USER_HELP = (
+    "Commands:\n"
+    "/start — show the platform menu\n"
+    "/help — this message\n\n"
+    "Just send a public X.com, YouTube, or Instagram link and I'll send the "
+    "video back. Videos over the size limit are compressed automatically."
+)
+
+ADMIN_HELP = (
+    "\n\nAdmin commands:\n"
+    "/stats — user & download statistics\n"
+    "/list — list all user IDs\n"
+    "/ban <user_id> — ban a user\n"
+    "/unban <user_id> — lift a ban\n"
+    "/send <user_id> <message> — message one user\n"
+    "/broadcast <message> — message all users"
+)
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await _register_and_check_ban(update, context):
+        return
+    settings: Settings = context.bot_data["settings"]
+    text = USER_HELP
+    if settings.admin_id and update.effective_user.id == settings.admin_id:
+        text += ADMIN_HELP
+    await update.message.reply_text(text)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

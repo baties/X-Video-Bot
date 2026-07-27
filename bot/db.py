@@ -61,15 +61,28 @@ class Database:
 
     # --- users -----------------------------------------------------------
 
-    async def upsert_user(self, user_id: int, username: str | None, first_name: str | None) -> None:
-        await asyncio.to_thread(
-            self._write,
-            """INSERT INTO users (user_id, username, first_name, first_seen)
-               VALUES (?, ?, ?, ?)
-               ON CONFLICT(user_id) DO UPDATE SET
-                   username = excluded.username,
-                   first_name = excluded.first_name""",
-            (user_id, username, first_name, int(time.time())),
+    def _upsert_user_sync(self, user_id: int, username: str | None, first_name: str | None) -> bool:
+        with self._lock:
+            exists = self._conn.execute(
+                "SELECT 1 FROM users WHERE user_id = ?", (user_id,)
+            ).fetchone()
+            self._conn.execute(
+                """INSERT INTO users (user_id, username, first_name, first_seen)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(user_id) DO UPDATE SET
+                       username = excluded.username,
+                       first_name = excluded.first_name""",
+                (user_id, username, first_name, int(time.time())),
+            )
+            self._conn.commit()
+            return exists is None
+
+    async def upsert_user(
+        self, user_id: int, username: str | None, first_name: str | None
+    ) -> bool:
+        """Insert or refresh a user. Returns True if this is a NEW user."""
+        return await asyncio.to_thread(
+            self._upsert_user_sync, user_id, username, first_name
         )
 
     async def is_banned(self, user_id: int) -> bool:
@@ -97,6 +110,12 @@ class Database:
             sql += " WHERE banned = 0"
         rows = await asyncio.to_thread(self._fetchall, sql)
         return [r["user_id"] for r in rows]
+
+    async def all_users(self) -> list[sqlite3.Row]:
+        return await asyncio.to_thread(
+            self._fetchall,
+            "SELECT user_id, username, first_name, banned FROM users ORDER BY first_seen",
+        )
 
     # --- downloads -------------------------------------------------------
 

@@ -11,10 +11,16 @@ from telegram.ext import (
     filters,
 )
 
-from bot.admin import ban, broadcast, stats, unban
+from bot.admin import ban, broadcast, list_users, send, stats, unban
 from bot.config import get_settings
 from bot.db import Database
-from bot.handlers import error_handler, handle_message, select_platform, start
+from bot.handlers import (
+    error_handler,
+    handle_message,
+    help_command,
+    select_platform,
+    start,
+)
 
 
 def main() -> None:
@@ -37,7 +43,10 @@ def main() -> None:
     app.bot_data["db"] = Database(settings.db_path)
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("stats", stats))
+    app.add_handler(CommandHandler("list", list_users))
+    app.add_handler(CommandHandler("send", send))
     app.add_handler(CommandHandler("ban", ban))
     app.add_handler(CommandHandler("unban", unban))
     app.add_handler(CommandHandler("broadcast", broadcast))
