@@ -8,8 +8,6 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction
 from telegram.ext import ContextTypes
 
-import time
-
 from .config import Settings
 from .db import Database
 from .transcode import CompressionFailed, CompressionImpossible, compress_to_fit
@@ -41,7 +39,9 @@ async def _register_and_check_ban(update: Update, context: ContextTypes.DEFAULT_
     settings: Settings = context.bot_data["settings"]
     user = update.effective_user
 
-    is_new = await db.upsert_user(user.id, user.username, user.first_name)
+    is_new = await db.upsert_user(
+        user.id, user.username, user.first_name, settings.initial_credit
+    )
 
     if is_new and settings.admin_id and user.id != settings.admin_id:
         name = f"@{user.username}" if user.username else (user.first_name or "-")
@@ -59,20 +59,37 @@ async def _register_and_check_ban(update: Update, context: ContextTypes.DEFAULT_
 USER_HELP = (
     "Commands:\n"
     "/start — show the platform menu\n"
+    "/balance — show your remaining download credits\n"
     "/help — this message\n\n"
     "Just send a public X.com, YouTube, or Instagram link and I'll send the "
-    "video back. Videos over the size limit are compressed automatically."
+    "video back. Videos over the size limit are compressed automatically.\n"
+    "Each successful download costs 1 credit; failed downloads are free. "
+    "New accounts start with free credits — contact the admin to top up."
 )
 
 ADMIN_HELP = (
     "\n\nAdmin commands:\n"
     "/stats — user & download statistics\n"
-    "/list — list all user IDs\n"
+    "/list — list all user IDs with credit\n"
+    "/credit <user_id> <amount> — add credit (negative to remove)\n"
     "/ban <user_id> — ban a user\n"
     "/unban <user_id> — lift a ban\n"
     "/send <user_id> <message> — message one user\n"
     "/broadcast <message> — message all users"
 )
+
+
+async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await _register_and_check_ban(update, context):
+        return
+    settings: Settings = context.bot_data["settings"]
+    db: Database = context.bot_data["db"]
+    user_id = update.effective_user.id
+    if settings.admin_id is not None and user_id == settings.admin_id:
+        await update.message.reply_text("You're the admin — unlimited downloads.")
+        return
+    credit = await db.get_credit(user_id)
+    await update.message.reply_text(f"Your credits: {credit}")
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -125,15 +142,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     platform, url = detected
     user_id = update.effective_user.id
+    is_admin = settings.admin_id is not None and user_id == settings.admin_id
 
-    if settings.downloads_per_day > 0:
-        used = await db.download_count_since(user_id, int(time.time()) - 86400)
-        if used >= settings.downloads_per_day:
-            await update.message.reply_text(
-                f"Daily limit reached ({settings.downloads_per_day} downloads per 24h). "
-                "Try again later."
-            )
-            return
+    if not is_admin and await db.get_credit(user_id) <= 0:
+        await update.message.reply_text(
+            "You have no download credits left. \n"
+            "Contact the admin to top up your account. Your ID: "
+            f"{user_id}"
+        )
+        return
 
     await db.record_download(user_id, platform.key, url)
 
@@ -204,6 +221,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 f"Downloaded {size_mb:.1f} MB (method 1: direct). Uploading..."
             )
 
+        sent_ok = False
         try:
             with open(filepath, "rb") as fh:
                 await update.message.reply_video(
@@ -212,16 +230,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     supports_streaming=True,
                 )
             await status.delete()
+            sent_ok = True
         except Exception as exc:
             log.exception("reply_video failed for %s, retrying as document", url)
             try:
                 with open(filepath, "rb") as fh:
                     await update.message.reply_document(document=fh, caption=result.title)
                 await status.delete()
+                sent_ok = True
             except Exception as exc2:
                 log.exception("reply_document also failed for %s", url)
                 await status.edit_text(
                     f"Downloaded, but upload to Telegram failed: {type(exc2).__name__}"
+                )
+
+        # Only successful deliveries cost a credit; the admin is exempt
+        if sent_ok and not is_admin:
+            remaining = await db.consume_credit(user_id)
+            if remaining is not None and remaining <= 1:
+                await update.message.reply_text(
+                    f"Credits remaining: {remaining}. "
+                    "Contact the admin to top up."
                 )
 
 

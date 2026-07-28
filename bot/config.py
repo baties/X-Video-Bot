@@ -22,7 +22,7 @@ class Settings:
         int(os.environ["ADMIN_ID"]) if os.getenv("ADMIN_ID") else None
     )
     db_path: str = os.getenv("DB_PATH", "bot.db")
-    downloads_per_day: int = int(os.getenv("DOWNLOADS_PER_DAY", "0"))  # 0 = unlimited
+    initial_credit: int = int(os.getenv("INITIAL_CREDIT", "5"))  # free downloads for new users
 
 
 def get_settings() -> Settings:

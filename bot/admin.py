@@ -103,7 +103,7 @@ async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     for u in users:
         name = f"@{u['username']}" if u["username"] else (u["first_name"] or "-")
         flag = " [BANNED]" if u["banned"] else ""
-        lines.append(f"{u['user_id']}  {name}{flag}")
+        lines.append(f"{u['user_id']}  {name}  credit:{u['credit']}{flag}")
 
     header = f"{len(users)} users:\n"
     # Telegram messages cap at 4096 chars — send in chunks
@@ -132,3 +132,29 @@ async def send(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             f"Failed to send to {user_id}: {type(exc).__name__} — "
             "user may have blocked the bot or never started it."
         )
+
+
+@admin_only
+async def credit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    args = context.args
+    if (
+        len(args) != 2
+        or not args[0].lstrip("-").isdigit()
+        or not args[1].lstrip("-").isdigit()
+    ):
+        await update.message.reply_text("Usage: /credit <user_id> <amount>")
+        return
+    user_id, amount = int(args[0]), int(args[1])
+    db: Database = context.bot_data["db"]
+    new_balance = await db.add_credit(user_id, amount)
+    if new_balance is None:
+        await update.message.reply_text(f"Unknown user {user_id}.")
+        return
+    await update.message.reply_text(f"User {user_id} credit is now {new_balance}.")
+    try:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=f"Your account was credited. New balance: {new_balance} downloads.",
+        )
+    except Exception:
+        pass  # user may have blocked the bot

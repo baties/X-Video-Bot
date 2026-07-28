@@ -14,7 +14,8 @@ CREATE TABLE IF NOT EXISTS users (
     username   TEXT,
     first_name TEXT,
     first_seen INTEGER NOT NULL,
-    banned     INTEGER NOT NULL DEFAULT 0
+    banned     INTEGER NOT NULL DEFAULT 0,
+    credit     INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS downloads (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -38,6 +39,12 @@ class Database:
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.executescript(_SCHEMA)
+            # Migration for databases created before the credit column existed
+            cols = [r["name"] for r in self._conn.execute("PRAGMA table_info(users)")]
+            if "credit" not in cols:
+                self._conn.execute(
+                    "ALTER TABLE users ADD COLUMN credit INTEGER NOT NULL DEFAULT 0"
+                )
             self._conn.commit()
         log.info("Database ready at %s", path)
 
@@ -61,28 +68,35 @@ class Database:
 
     # --- users -----------------------------------------------------------
 
-    def _upsert_user_sync(self, user_id: int, username: str | None, first_name: str | None) -> bool:
+    def _upsert_user_sync(
+        self, user_id: int, username: str | None, first_name: str | None, initial_credit: int
+    ) -> bool:
         with self._lock:
             exists = self._conn.execute(
                 "SELECT 1 FROM users WHERE user_id = ?", (user_id,)
             ).fetchone()
             self._conn.execute(
-                """INSERT INTO users (user_id, username, first_name, first_seen)
-                   VALUES (?, ?, ?, ?)
+                """INSERT INTO users (user_id, username, first_name, first_seen, credit)
+                   VALUES (?, ?, ?, ?, ?)
                    ON CONFLICT(user_id) DO UPDATE SET
                        username = excluded.username,
                        first_name = excluded.first_name""",
-                (user_id, username, first_name, int(time.time())),
+                (user_id, username, first_name, int(time.time()), initial_credit),
             )
             self._conn.commit()
             return exists is None
 
     async def upsert_user(
-        self, user_id: int, username: str | None, first_name: str | None
+        self,
+        user_id: int,
+        username: str | None,
+        first_name: str | None,
+        initial_credit: int = 0,
     ) -> bool:
-        """Insert or refresh a user. Returns True if this is a NEW user."""
+        """Insert or refresh a user. New users start with initial_credit.
+        Returns True if this is a NEW user."""
         return await asyncio.to_thread(
-            self._upsert_user_sync, user_id, username, first_name
+            self._upsert_user_sync, user_id, username, first_name, initial_credit
         )
 
     async def is_banned(self, user_id: int) -> bool:
@@ -111,10 +125,51 @@ class Database:
         rows = await asyncio.to_thread(self._fetchall, sql)
         return [r["user_id"] for r in rows]
 
+    async def get_credit(self, user_id: int) -> int:
+        row = await asyncio.to_thread(
+            self._fetchone, "SELECT credit FROM users WHERE user_id = ?", (user_id,)
+        )
+        return row["credit"] if row else 0
+
+    def _add_credit_sync(self, user_id: int, amount: int) -> int | None:
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE users SET credit = MAX(0, credit + ?) WHERE user_id = ?",
+                (amount, user_id),
+            )
+            if cur.rowcount == 0:
+                return None
+            self._conn.commit()
+            return self._conn.execute(
+                "SELECT credit FROM users WHERE user_id = ?", (user_id,)
+            ).fetchone()["credit"]
+
+    async def add_credit(self, user_id: int, amount: int) -> int | None:
+        """Add (or with negative amount, remove) credit. Floors at 0.
+        Returns the new balance, or None if the user is unknown."""
+        return await asyncio.to_thread(self._add_credit_sync, user_id, amount)
+
+    def _consume_credit_sync(self, user_id: int) -> int | None:
+        """Atomically spend 1 credit. Returns new balance, None if none left."""
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE users SET credit = credit - 1 WHERE user_id = ? AND credit > 0",
+                (user_id,),
+            )
+            if cur.rowcount == 0:
+                return None
+            self._conn.commit()
+            return self._conn.execute(
+                "SELECT credit FROM users WHERE user_id = ?", (user_id,)
+            ).fetchone()["credit"]
+
+    async def consume_credit(self, user_id: int) -> int | None:
+        return await asyncio.to_thread(self._consume_credit_sync, user_id)
+
     async def all_users(self) -> list[sqlite3.Row]:
         return await asyncio.to_thread(
             self._fetchall,
-            "SELECT user_id, username, first_name, banned FROM users ORDER BY first_seen",
+            "SELECT user_id, username, first_name, banned, credit FROM users ORDER BY first_seen",
         )
 
     # --- downloads -------------------------------------------------------
