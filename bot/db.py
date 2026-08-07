@@ -221,9 +221,16 @@ class Database:
         return await asyncio.to_thread(self._consume_credit_sync, user_id, amount)
 
     async def all_users(self) -> list[sqlite3.Row]:
+        """All users, with free_credit shown as its EFFECTIVE value (i.e. what
+        the lazy refill would grant on the user's next interaction)."""
+        now = int(time.time())
         return await asyncio.to_thread(
             self._fetchall,
-            "SELECT user_id, username, first_name, banned, credit, free_credit FROM users ORDER BY first_seen",
+            """SELECT user_id, username, first_name, banned, credit,
+                      CASE WHEN ? >= free_reset_at + ?
+                           THEN ? ELSE free_credit END AS free_credit
+               FROM users ORDER BY first_seen""",
+            (now, self.free_period, self.free_credits),
         )
 
     # --- downloads -------------------------------------------------------
