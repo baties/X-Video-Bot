@@ -9,6 +9,8 @@ from telegram.ext import ContextTypes
 
 from .config import Settings
 from .db import Database
+from .logsetup import event
+from .notify import NOTIFY_KEY
 
 log = logging.getLogger(__name__)
 
@@ -21,6 +23,7 @@ def admin_only(func):
         if settings.admin_id is None or user is None or user.id != settings.admin_id:
             # Silently ignore — don't advertise admin commands exist
             return
+        event("admin_cmd", cmd=(update.message.text or "")[:120])
         return await func(update, context)
 
     return wrapper
@@ -79,7 +82,7 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     db: Database = context.bot_data["db"]
-    user_ids = await db.all_user_ids()
+    user_ids = await db.broadcast_user_ids()  # respects /notifications opt-out
     status = await update.message.reply_text(f"Broadcasting to {len(user_ids)} users...")
 
     sent = failed = 0
@@ -91,7 +94,11 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             failed += 1  # user blocked the bot, deleted account, etc.
         await asyncio.sleep(0.05)  # stay under Telegram's ~30 msg/s flood limit
 
-    await status.edit_text(f"Broadcast done: {sent} sent, {failed} failed.")
+    event("broadcast", recipients=len(user_ids), sent=sent, failed=failed)
+    await status.edit_text(
+        f"Broadcast done: {sent} sent, {failed} failed "
+        "(opted-out and banned users excluded)."
+    )
 
 
 @admin_only
@@ -260,3 +267,14 @@ async def queue_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     for uid, plat, prio in s["active_jobs"]:
         lines.append(f"  ▶ {uid} — {plat}{' (VIP)' if prio else ''}")
     await update.message.reply_text("\n".join(lines))
+
+
+@admin_only
+async def notify_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Toggle error notifications to the admin."""
+    db: Database = context.bot_data["db"]
+    new_state = "off" if await db.get_setting(NOTIFY_KEY, "on") == "on" else "on"
+    await db.set_setting(NOTIFY_KEY, new_state)
+    await update.message.reply_text(
+        f"Error notifications are now {new_state.upper()}. /notify to toggle."
+    )

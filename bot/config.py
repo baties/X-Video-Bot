@@ -25,6 +25,7 @@ class Settings:
     download_timeout: int = int(os.getenv("DOWNLOAD_TIMEOUT_SEC", "120"))
     upload_timeout: int = int(os.getenv("UPLOAD_TIMEOUT_SEC", "300"))
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
+    log_dir: str = os.getenv("LOG_DIR", "logs")
     cookies_file: str | None = os.getenv("COOKIES_FILE") or None
     proxy_url: str | None = os.getenv("PROXY_URL") or None
     pot_provider_url: str | None = os.getenv("POT_PROVIDER_URL") or None

@@ -12,6 +12,10 @@ YouTube, and Instagram, and sends them back in chat.
 - Credit system: renewable free plan + purchased credits via Telegram Stars
 - VIP tier: larger file limit, queue priority — sold via Stars or granted by admin
 - Real download queue: priority lanes, /status position, /cancel while queued
+- Support tickets: users reach the admin with /support, admin answers by
+  replying in Telegram
+- Rotating file logs (app + structured events) written to a host-mounted
+  volume, plus toggleable admin error alerts
 - SQLite persistence: users, bans, download history, payment transactions
 - Admin tools: stats, user list, ban/unban, direct message, broadcast,
   manual credit, Stars refunds
@@ -68,14 +72,49 @@ Over-limit videos are rejected and never cost credits. Separately,
 Telegram bots can upload at most 50 MB, so anything between the Telegram
 cap and the user's limit is compressed with ffmpeg to fit.
 
+## Logging
+
+Two rotating log files are written to `LOG_DIR` (compose sets `/data/logs`,
+visible on the host as `./data/logs`, 5 MB x 5 files each):
+
+| File         | Contents                                                     |
+|--------------|--------------------------------------------------------------|
+| `bot.log`    | Application log — warnings, errors, tracebacks                |
+| `events.log` | One line per event: joins, download requests/results, payments, admin commands, tickets, broadcasts |
+
+```bash
+tail -f data/logs/events.log
+grep download_fail data/logs/events.log
+```
+
+Important errors (unexpected download failures, repeated upload failures,
+worker crashes, unhandled exceptions) are also pushed to the admin in
+Telegram. The admin toggles these with `/notify`; the setting persists in
+the database.
+
+## Support tickets
+
+`/support <message>` opens a ticket and relays the message to the admin.
+While the ticket is open, any plain text the user sends goes to support too
+(links still download as normal). The admin answers by **replying** to the
+relayed message in Telegram, and either side can close the ticket — the user
+with `/close`, the admin with `/close <user_id>`.
+
+## Broadcast opt-out
+
+Users control admin broadcasts with `/notifications` (on by default).
+`/broadcast` skips opted-out and banned users.
+
 ## Commands
 
 User: `/start` (platform menu), `/balance`, `/status`, `/cancel`, `/buy`,
-`/terms`, `/paysupport`, `/help`
+`/support <msg>`, `/close`, `/notifications`, `/terms`, `/paysupport`,
+`/help`
 
-Admin: `/stats`, `/list`, `/queue`, `/credit <id> <amount>`,
+Admin: `/stats`, `/list`, `/queue`, `/notify`, `/credit <id> <amount>`,
 `/vip <id|@username>`, `/unvip <id|@username>`, `/refund <charge_id>`,
-`/ban <id>`, `/unban <id>`, `/send <id> <msg>`, `/broadcast <msg>`
+`/ban <id>`, `/unban <id>`, `/send <id> <msg>`, `/close <id>`,
+`/broadcast <msg>`
 
 ## Project structure
 
@@ -180,6 +219,7 @@ docker run -d -p 4416:4416 --restart unless-stopped \
 | `VIP_SIZE_LIMIT_MB`    | 100     | Max source-video size, VIP users         |
 | `VIP_PRICE_STARS`      | 150     | VIP membership price (0 disables)        |
 | `VIP_DAYS`             | 30      | VIP membership duration per purchase     |
+| `LOG_DIR`              | logs    | Log directory (compose: /data/logs)      |
 
 ## Notes & limits
 

@@ -14,6 +14,7 @@ from telegram.ext import (
 
 from bot.admin import (
     ban,
+    notify_toggle,
     broadcast,
     credit,
     list_users,
@@ -33,12 +34,17 @@ from bot.payments import (
     precheckout,
     successful_payment,
 )
+from bot.logsetup import setup_logging
+from bot.notify import notify_admin_error
 from bot.queue import DownloadQueue
 from bot.config import get_settings
 from bot.db import Database
 from bot.handlers import (
     balance,
     cancel,
+    close_ticket,
+    notifications,
+    support,
     error_handler,
     handle_message,
     help_command,
@@ -57,8 +63,20 @@ async def _worker(app, worker_id: int) -> None:
         job = await queue.get()
         try:
             await process_job(app, job)
-        except Exception:
+        except Exception as exc:
             log.exception("Job for user %s crashed", job.user_id)
+            try:
+                await notify_admin_error(
+                    app.bot, app.bot_data["db"], app.bot_data["settings"],
+                    f"Download worker crashed on user {job.user_id}'s job: "
+                    f"{type(exc).__name__}: {exc}",
+                )
+                await job.status.edit_text(
+                    "Something went wrong with your download. "
+                    "(No credits were spent.)"
+                )
+            except Exception:
+                pass
         finally:
             queue.done(job)
 
@@ -75,11 +93,7 @@ async def _post_init(app) -> None:
 def main() -> None:
     settings = get_settings()
 
-    logging.basicConfig(
-        format="%(asctime)s %(name)s %(levelname)s %(message)s",
-        level=settings.log_level,
-    )
-    logging.getLogger("httpx").setLevel(logging.WARNING)
+    setup_logging(settings.log_dir, settings.log_level)
 
     request = HTTPXRequest(
         connect_timeout=30,
@@ -108,6 +122,9 @@ def main() -> None:
     app.add_handler(CommandHandler("terms", terms))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("cancel", cancel))
+    app.add_handler(CommandHandler("support", support))
+    app.add_handler(CommandHandler("close", close_ticket))
+    app.add_handler(CommandHandler("notifications", notifications))
     app.add_handler(CommandHandler("buy", buy))
     app.add_handler(CommandHandler("paysupport", paysupport))
     app.add_handler(CommandHandler("refund", refund))
@@ -119,6 +136,7 @@ def main() -> None:
     app.add_handler(CommandHandler("vip", vip))
     app.add_handler(CommandHandler("unvip", unvip))
     app.add_handler(CommandHandler("queue", queue_status))
+    app.add_handler(CommandHandler("notify", notify_toggle))
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("list", list_users))
     app.add_handler(CommandHandler("send", send))

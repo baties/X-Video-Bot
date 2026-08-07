@@ -12,6 +12,7 @@ from telegram.ext import ContextTypes
 
 from .config import Settings
 from .db import Database
+from .logsetup import event
 
 log = logging.getLogger(__name__)
 
@@ -120,6 +121,8 @@ async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
     log.info("Payment: user=%s payload=%s stars=%s charge=%s",
              user.id, sp.invoice_payload, sp.total_amount,
              sp.telegram_payment_charge_id)
+    event("payment", user=user.id, payload=sp.invoice_payload,
+          stars=sp.total_amount, charge=sp.telegram_payment_charge_id)
 
     if kind == PAYLOAD_PREFIX:
         new_balance = await db.add_credit(user.id, bought_credits)

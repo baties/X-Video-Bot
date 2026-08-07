@@ -8,6 +8,7 @@ services:
       # Point yt-dlp's PO token plugin at the provider container
       POT_PROVIDER_URL: http://pot-provider:4416
       DB_PATH: /data/bot.db
+      LOG_DIR: /data/logs
     volumes:
       - ./data:/data
     depends_on:

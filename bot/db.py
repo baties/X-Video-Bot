@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS users (
     free_credit   INTEGER NOT NULL DEFAULT 0,
     free_reset_at INTEGER NOT NULL DEFAULT 0,
     vip           INTEGER NOT NULL DEFAULT 0,
-    vip_until     INTEGER NOT NULL DEFAULT 0
+    vip_until     INTEGER NOT NULL DEFAULT 0,
+    broadcast_on  INTEGER NOT NULL DEFAULT 1
 );
 CREATE TABLE IF NOT EXISTS downloads (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -30,6 +31,17 @@ CREATE TABLE IF NOT EXISTS downloads (
 );
 CREATE INDEX IF NOT EXISTS idx_downloads_user_time
     ON downloads(user_id, created_at);
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS tickets (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL,
+    status     TEXT NOT NULL DEFAULT 'open',
+    created_at INTEGER NOT NULL,
+    closed_at  INTEGER
+);
 CREATE TABLE IF NOT EXISTS transactions (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id    INTEGER NOT NULL,
@@ -62,6 +74,7 @@ class Database:
                 ("free_reset_at", "ALTER TABLE users ADD COLUMN free_reset_at INTEGER NOT NULL DEFAULT 0"),
                 ("vip", "ALTER TABLE users ADD COLUMN vip INTEGER NOT NULL DEFAULT 0"),
                 ("vip_until", "ALTER TABLE users ADD COLUMN vip_until INTEGER NOT NULL DEFAULT 0"),
+                ("broadcast_on", "ALTER TABLE users ADD COLUMN broadcast_on INTEGER NOT NULL DEFAULT 1"),
             ]:
                 if col not in cols:
                     self._conn.execute(ddl)
@@ -390,3 +403,79 @@ class Database:
                FROM transactions WHERE refunded = 0""",
         )
         return {"payments": row["n"], "stars": row["stars"]}
+
+    # --- settings (key/value) --------------------------------------------
+
+    async def get_setting(self, key: str, default: str = "") -> str:
+        row = await asyncio.to_thread(
+            self._fetchone, "SELECT value FROM settings WHERE key = ?", (key,)
+        )
+        return row["value"] if row else default
+
+    async def set_setting(self, key: str, value: str) -> None:
+        await asyncio.to_thread(
+            self._write,
+            "INSERT INTO settings (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+
+    # --- broadcast opt-in/out --------------------------------------------
+
+    async def get_broadcast_on(self, user_id: int) -> bool:
+        row = await asyncio.to_thread(
+            self._fetchone,
+            "SELECT broadcast_on FROM users WHERE user_id = ?", (user_id,),
+        )
+        return bool(row and row["broadcast_on"])
+
+    async def set_broadcast_on(self, user_id: int, on: bool) -> None:
+        await asyncio.to_thread(
+            self._write,
+            "UPDATE users SET broadcast_on = ? WHERE user_id = ?",
+            (int(on), user_id),
+        )
+
+    async def broadcast_user_ids(self) -> list[int]:
+        rows = await asyncio.to_thread(
+            self._fetchall,
+            "SELECT user_id FROM users WHERE banned = 0 AND broadcast_on = 1",
+        )
+        return [r["user_id"] for r in rows]
+
+    # --- support tickets --------------------------------------------------
+
+    async def get_open_ticket(self, user_id: int):
+        return await asyncio.to_thread(
+            self._fetchone,
+            "SELECT * FROM tickets WHERE user_id = ? AND status = 'open'",
+            (user_id,),
+        )
+
+    async def open_ticket(self, user_id: int) -> int:
+        """Return the id of the user's open ticket, creating one if needed."""
+        existing = await self.get_open_ticket(user_id)
+        if existing:
+            return existing["id"]
+
+        def _create() -> int:
+            with self._lock:
+                cur = self._conn.execute(
+                    "INSERT INTO tickets (user_id, created_at) VALUES (?, ?)",
+                    (user_id, int(time.time())),
+                )
+                self._conn.commit()
+                return cur.lastrowid
+
+        return await asyncio.to_thread(_create)
+
+    async def close_ticket(self, user_id: int) -> bool:
+        ticket = await self.get_open_ticket(user_id)
+        if not ticket:
+            return False
+        await asyncio.to_thread(
+            self._write,
+            "UPDATE tickets SET status = 'closed', closed_at = ? WHERE id = ?",
+            (int(time.time()), ticket["id"]),
+        )
+        return True
