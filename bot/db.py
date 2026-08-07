@@ -26,6 +26,15 @@ CREATE TABLE IF NOT EXISTS downloads (
 );
 CREATE INDEX IF NOT EXISTS idx_downloads_user_time
     ON downloads(user_id, created_at);
+CREATE TABLE IF NOT EXISTS transactions (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL,
+    credits    INTEGER NOT NULL,
+    stars      INTEGER NOT NULL,
+    charge_id  TEXT NOT NULL UNIQUE,
+    refunded   INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL
+);
 """
 
 
@@ -149,12 +158,12 @@ class Database:
         Returns the new balance, or None if the user is unknown."""
         return await asyncio.to_thread(self._add_credit_sync, user_id, amount)
 
-    def _consume_credit_sync(self, user_id: int) -> int | None:
-        """Atomically spend 1 credit. Returns new balance, None if none left."""
+    def _consume_credit_sync(self, user_id: int, amount: int) -> int | None:
+        """Atomically spend `amount` credits. Returns new balance, None if insufficient."""
         with self._lock:
             cur = self._conn.execute(
-                "UPDATE users SET credit = credit - 1 WHERE user_id = ? AND credit > 0",
-                (user_id,),
+                "UPDATE users SET credit = credit - ? WHERE user_id = ? AND credit >= ?",
+                (amount, user_id, amount),
             )
             if cur.rowcount == 0:
                 return None
@@ -163,8 +172,8 @@ class Database:
                 "SELECT credit FROM users WHERE user_id = ?", (user_id,)
             ).fetchone()["credit"]
 
-    async def consume_credit(self, user_id: int) -> int | None:
-        return await asyncio.to_thread(self._consume_credit_sync, user_id)
+    async def consume_credit(self, user_id: int, amount: int = 1) -> int | None:
+        return await asyncio.to_thread(self._consume_credit_sync, user_id, amount)
 
     async def all_users(self) -> list[sqlite3.Row]:
         return await asyncio.to_thread(
@@ -206,3 +215,38 @@ class Database:
             "downloads_total": downloads,
             "downloads_24h": downloads_24h,
         }
+
+    # --- transactions ----------------------------------------------------
+
+    async def record_transaction(
+        self, user_id: int, credits: int, stars: int, charge_id: str
+    ) -> None:
+        await asyncio.to_thread(
+            self._write,
+            """INSERT OR IGNORE INTO transactions
+               (user_id, credits, stars, charge_id, created_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (user_id, credits, stars, charge_id, int(time.time())),
+        )
+
+    async def get_transaction(self, charge_id: str):
+        return await asyncio.to_thread(
+            self._fetchone,
+            "SELECT * FROM transactions WHERE charge_id = ?",
+            (charge_id,),
+        )
+
+    async def mark_refunded(self, charge_id: str) -> None:
+        await asyncio.to_thread(
+            self._write,
+            "UPDATE transactions SET refunded = 1 WHERE charge_id = ?",
+            (charge_id,),
+        )
+
+    async def revenue_stats(self) -> dict:
+        row = await asyncio.to_thread(
+            self._fetchone,
+            """SELECT COUNT(*) AS n, COALESCE(SUM(stars), 0) AS stars
+               FROM transactions WHERE refunded = 0""",
+        )
+        return {"payments": row["n"], "stars": row["stars"]}

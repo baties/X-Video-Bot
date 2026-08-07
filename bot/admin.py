@@ -36,9 +36,11 @@ def _parse_user_id(args: list[str]) -> int | None:
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     db: Database = context.bot_data["db"]
     s = await db.stats()
+    rev = await db.revenue_stats()
     await update.message.reply_text(
         f"Users: {s['users']} ({s['banned']} banned)\n"
-        f"Downloads: {s['downloads_total']} total, {s['downloads_24h']} in last 24h"
+        f"Downloads: {s['downloads_total']} total, {s['downloads_24h']} in last 24h\n"
+        f"Payments: {rev['payments']} — {rev['stars']} ⭐ total"
     )
 
 
@@ -158,3 +160,35 @@ async def credit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
     except Exception:
         pass  # user may have blocked the bot
+
+
+@admin_only
+async def refund(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if len(context.args) != 1:
+        await update.message.reply_text("Usage: /refund <charge_id>")
+        return
+    charge_id = context.args[0]
+    db: Database = context.bot_data["db"]
+
+    tx = await db.get_transaction(charge_id)
+    if tx is None:
+        await update.message.reply_text("Unknown charge_id.")
+        return
+    if tx["refunded"]:
+        await update.message.reply_text("Already refunded.")
+        return
+
+    try:
+        await context.bot.refund_star_payment(
+            user_id=tx["user_id"], telegram_payment_charge_id=charge_id
+        )
+    except Exception as exc:
+        await update.message.reply_text(f"Telegram refund failed: {exc}")
+        return
+
+    await db.mark_refunded(charge_id)
+    new_balance = await db.add_credit(tx["user_id"], -tx["credits"])
+    await update.message.reply_text(
+        f"Refunded {tx['stars']} ⭐ to {tx['user_id']}; removed {tx['credits']} "
+        f"credits (balance now {new_balance})."
+    )
