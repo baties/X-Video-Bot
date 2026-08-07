@@ -31,7 +31,9 @@ async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         for credits, stars in settings.star_packages
     ]
     await update.message.reply_text(
-        "Top up your download credits with Telegram Stars:",
+        "Top up with Telegram Stars. Purchased credits NEVER expire and are "
+        "only spent after your free credits run out — your weekly free "
+        "credits keep refilling either way.",
         reply_markup=InlineKeyboardMarkup(rows),
     )
 

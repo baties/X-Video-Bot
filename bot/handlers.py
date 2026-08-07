@@ -25,6 +25,15 @@ log = logging.getLogger(__name__)
 ANY_MODE = "any"
 
 
+def _fmt_duration(seconds: int) -> str:
+    days, rem = divmod(seconds, 86400)
+    hours = rem // 3600
+    if days > 0:
+        return f"{days}d {hours}h"
+    minutes = (rem % 3600) // 60
+    return f"{hours}h {minutes}m" if hours else f"{minutes}m"
+
+
 def _menu() -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(p.label, callback_data=f"platform:{p.key}")]
@@ -45,9 +54,7 @@ async def _register_and_check_ban(update: Update, context: ContextTypes.DEFAULT_
     settings: Settings = context.bot_data["settings"]
     user = update.effective_user
 
-    is_new = await db.upsert_user(
-        user.id, user.username, user.first_name, settings.initial_credit
-    )
+    is_new = await db.upsert_user(user.id, user.username, user.first_name)
 
     if is_new and settings.admin_id and user.id != settings.admin_id:
         name = f"@{user.username}" if user.username else (user.first_name or "-")
@@ -69,8 +76,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "Pick a platform, then send me a link — or just send any supported link "
         "and I'll auto-detect it.\nOnly public posts are supported.\n\n"
-        f"New accounts start with {settings.initial_credit} free credits. "
-        f"{_costs_line(settings)}. Top up with /buy.",
+        f"Free plan: {settings.free_credits} credits every "
+        f"{settings.free_period_days} days. {_costs_line(settings)}. "
+        "Need more? Top up with /buy — purchased credits never expire.",
         reply_markup=_menu(),
     )
 
@@ -99,6 +107,7 @@ USER_HELP = (
     "Just send a public X.com, YouTube, or Instagram link and I'll send the "
     "video back. Videos over the size limit are compressed automatically.\n"
     "Only successful downloads cost credits; failures are free.\n"
+    "Free credits refill periodically; purchased credits never expire.\n"
 )
 
 ADMIN_HELP = (
@@ -136,9 +145,12 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if settings.admin_id is not None and user_id == settings.admin_id:
         await update.message.reply_text("You're the admin — unlimited downloads.")
         return
-    credit = await db.get_credit(user_id)
+    bal = await db.get_balances(user_id)
     await update.message.reply_text(
-        f"Your credits: {credit}\n{_costs_line(settings)}\nTop up with /buy."
+        f"Free credits: {bal['free']} (refill to {settings.free_credits} "
+        f"in {_fmt_duration(bal['reset_in'])})\n"
+        f"Purchased credits: {bal['paid']} (never expire)\n"
+        f"{_costs_line(settings)}\nTop up with /buy."
     )
 
 
@@ -178,12 +190,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     is_admin = settings.admin_id is not None and user_id == settings.admin_id
     cost = settings.cost_for(platform.key)
 
-    if not is_admin and await db.get_credit(user_id) < cost:
-        await update.message.reply_text(
-            f"A {platform.label} download costs {cost} credit(s) and your balance "
-            f"is too low. Top up with /buy. Your ID: {user_id}"
-        )
-        return
+    if not is_admin:
+        bal = await db.get_balances(user_id)
+        if bal["total"] < cost:
+            await update.message.reply_text(
+                f"A {platform.label} download costs {cost} credit(s); you have "
+                f"{bal['total']}.\n"
+                f"Your free credits refill in {_fmt_duration(bal['reset_in'])} — "
+                "or top up now with /buy (purchased credits never expire)."
+            )
+            return
 
     # Per-user cooldown: one download at a time
     active: set = context.bot_data.setdefault("active_downloads", set())
@@ -314,9 +330,12 @@ async def _process_download(update, context, platform, url, cost: int, is_admin:
     # Only successful deliveries cost credits; the admin is exempt
     if sent_ok and not is_admin:
         remaining = await db.consume_credit(user_id, cost)
-        if remaining is not None and remaining <= 3:
+        if remaining is not None and remaining["total"] <= 3:
+            bal = await db.get_balances(user_id)
             await update.message.reply_text(
-                f"Credits remaining: {remaining}. Top up with /buy."
+                f"Credits left: {remaining['total']} "
+                f"(free refill in {_fmt_duration(bal['reset_in'])}). "
+                "Top up anytime with /buy."
             )
 
 

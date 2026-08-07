@@ -45,7 +45,11 @@ def main() -> None:
     )
     app = Application.builder().token(settings.bot_token).request(request).build()
     app.bot_data["settings"] = settings
-    app.bot_data["db"] = Database(settings.db_path)
+    app.bot_data["db"] = Database(
+        settings.db_path,
+        free_credits=settings.free_credits,
+        free_period=settings.free_period_days * 86400,
+    )
     app.bot_data["dl_semaphore"] = asyncio.Semaphore(settings.max_concurrent_downloads)
 
     app.add_handler(CommandHandler("start", start))

@@ -32,7 +32,9 @@ class Settings:
         int(os.environ["ADMIN_ID"]) if os.getenv("ADMIN_ID") else None
     )
     db_path: str = os.getenv("DB_PATH", "bot.db")
-    initial_credit: int = int(os.getenv("INITIAL_CREDIT", "5"))
+    # Free plan: this many credits, renewed every free_period_days
+    free_credits: int = int(os.getenv("FREE_CREDITS", os.getenv("INITIAL_CREDIT", "5")))
+    free_period_days: int = int(os.getenv("FREE_PERIOD_DAYS", "7"))
 
     # Credit cost per successful download, by platform key
     credit_costs: dict = field(default_factory=lambda: {

@@ -105,7 +105,9 @@ async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     for u in users:
         name = f"@{u['username']}" if u["username"] else (u["first_name"] or "-")
         flag = " [BANNED]" if u["banned"] else ""
-        lines.append(f"{u['user_id']}  {name}  credit:{u['credit']}{flag}")
+        lines.append(
+            f"{u['user_id']}  {name}  free:{u['free_credit']} paid:{u['credit']}{flag}"
+        )
 
     header = f"{len(users)} users:\n"
     # Telegram messages cap at 4096 chars — send in chunks

@@ -15,7 +15,9 @@ CREATE TABLE IF NOT EXISTS users (
     first_name TEXT,
     first_seen INTEGER NOT NULL,
     banned     INTEGER NOT NULL DEFAULT 0,
-    credit     INTEGER NOT NULL DEFAULT 0
+    credit     INTEGER NOT NULL DEFAULT 0,
+    free_credit   INTEGER NOT NULL DEFAULT 0,
+    free_reset_at INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS downloads (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -41,7 +43,9 @@ CREATE TABLE IF NOT EXISTS transactions (
 class Database:
     """Thread-safe SQLite wrapper; public methods are async (run in a thread)."""
 
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: str, free_credits: int = 5, free_period: int = 7 * 86400) -> None:
+        self.free_credits = free_credits
+        self.free_period = free_period
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._lock = threading.Lock()
@@ -50,10 +54,13 @@ class Database:
             self._conn.executescript(_SCHEMA)
             # Migration for databases created before the credit column existed
             cols = [r["name"] for r in self._conn.execute("PRAGMA table_info(users)")]
-            if "credit" not in cols:
-                self._conn.execute(
-                    "ALTER TABLE users ADD COLUMN credit INTEGER NOT NULL DEFAULT 0"
-                )
+            for col, ddl in [
+                ("credit", "ALTER TABLE users ADD COLUMN credit INTEGER NOT NULL DEFAULT 0"),
+                ("free_credit", "ALTER TABLE users ADD COLUMN free_credit INTEGER NOT NULL DEFAULT 0"),
+                ("free_reset_at", "ALTER TABLE users ADD COLUMN free_reset_at INTEGER NOT NULL DEFAULT 0"),
+            ]:
+                if col not in cols:
+                    self._conn.execute(ddl)
             self._conn.commit()
         log.info("Database ready at %s", path)
 
@@ -78,34 +85,33 @@ class Database:
     # --- users -----------------------------------------------------------
 
     def _upsert_user_sync(
-        self, user_id: int, username: str | None, first_name: str | None, initial_credit: int
+        self, user_id: int, username: str | None, first_name: str | None
     ) -> bool:
+        now = int(time.time())
         with self._lock:
             exists = self._conn.execute(
                 "SELECT 1 FROM users WHERE user_id = ?", (user_id,)
             ).fetchone()
             self._conn.execute(
-                """INSERT INTO users (user_id, username, first_name, first_seen, credit)
-                   VALUES (?, ?, ?, ?, ?)
+                """INSERT INTO users
+                   (user_id, username, first_name, first_seen, credit,
+                    free_credit, free_reset_at)
+                   VALUES (?, ?, ?, ?, 0, ?, ?)
                    ON CONFLICT(user_id) DO UPDATE SET
                        username = excluded.username,
                        first_name = excluded.first_name""",
-                (user_id, username, first_name, int(time.time()), initial_credit),
+                (user_id, username, first_name, now, self.free_credits, now),
             )
             self._conn.commit()
             return exists is None
 
     async def upsert_user(
-        self,
-        user_id: int,
-        username: str | None,
-        first_name: str | None,
-        initial_credit: int = 0,
+        self, user_id: int, username: str | None, first_name: str | None
     ) -> bool:
-        """Insert or refresh a user. New users start with initial_credit.
+        """Insert or refresh a user. New users get the free allowance.
         Returns True if this is a NEW user."""
         return await asyncio.to_thread(
-            self._upsert_user_sync, user_id, username, first_name, initial_credit
+            self._upsert_user_sync, user_id, username, first_name
         )
 
     async def is_banned(self, user_id: int) -> bool:
@@ -134,11 +140,39 @@ class Database:
         rows = await asyncio.to_thread(self._fetchall, sql)
         return [r["user_id"] for r in rows]
 
-    async def get_credit(self, user_id: int) -> int:
-        row = await asyncio.to_thread(
-            self._fetchone, "SELECT credit FROM users WHERE user_id = ?", (user_id,)
-        )
-        return row["credit"] if row else 0
+    def _refresh_free_locked(self, user_id: int, now: int) -> None:
+        """Re-grant the free allowance if the period elapsed. Caller holds the lock."""
+        row = self._conn.execute(
+            "SELECT free_reset_at FROM users WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        if row and now >= row["free_reset_at"] + self.free_period:
+            self._conn.execute(
+                "UPDATE users SET free_credit = ?, free_reset_at = ? WHERE user_id = ?",
+                (self.free_credits, now, user_id),
+            )
+            self._conn.commit()
+
+    def _balances_sync(self, user_id: int) -> dict:
+        now = int(time.time())
+        with self._lock:
+            self._refresh_free_locked(user_id, now)
+            row = self._conn.execute(
+                "SELECT credit, free_credit, free_reset_at FROM users WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+            if not row:
+                return {"free": 0, "paid": 0, "total": 0, "reset_in": 0}
+            reset_in = max(0, row["free_reset_at"] + self.free_period - now)
+            return {
+                "free": row["free_credit"],
+                "paid": row["credit"],
+                "total": row["free_credit"] + row["credit"],
+                "reset_in": reset_in,
+            }
+
+    async def get_balances(self, user_id: int) -> dict:
+        """Free/paid/total balances, refreshing the weekly free allowance first."""
+        return await asyncio.to_thread(self._balances_sync, user_id)
 
     def _add_credit_sync(self, user_id: int, amount: int) -> int | None:
         with self._lock:
@@ -158,27 +192,38 @@ class Database:
         Returns the new balance, or None if the user is unknown."""
         return await asyncio.to_thread(self._add_credit_sync, user_id, amount)
 
-    def _consume_credit_sync(self, user_id: int, amount: int) -> int | None:
-        """Atomically spend `amount` credits. Returns new balance, None if insufficient."""
+    def _consume_credit_sync(self, user_id: int, amount: int) -> dict | None:
+        """Spend `amount`, free credits first, then paid. Atomic under the lock.
+        Returns remaining balances, or None if insufficient."""
+        now = int(time.time())
         with self._lock:
-            cur = self._conn.execute(
-                "UPDATE users SET credit = credit - ? WHERE user_id = ? AND credit >= ?",
-                (amount, user_id, amount),
-            )
-            if cur.rowcount == 0:
+            self._refresh_free_locked(user_id, now)
+            row = self._conn.execute(
+                "SELECT credit, free_credit FROM users WHERE user_id = ?", (user_id,)
+            ).fetchone()
+            if not row or row["free_credit"] + row["credit"] < amount:
                 return None
+            from_free = min(row["free_credit"], amount)
+            from_paid = amount - from_free
+            self._conn.execute(
+                "UPDATE users SET free_credit = free_credit - ?, credit = credit - ? "
+                "WHERE user_id = ?",
+                (from_free, from_paid, user_id),
+            )
             self._conn.commit()
-            return self._conn.execute(
-                "SELECT credit FROM users WHERE user_id = ?", (user_id,)
-            ).fetchone()["credit"]
+            return {
+                "free": row["free_credit"] - from_free,
+                "paid": row["credit"] - from_paid,
+                "total": row["free_credit"] + row["credit"] - amount,
+            }
 
-    async def consume_credit(self, user_id: int, amount: int = 1) -> int | None:
+    async def consume_credit(self, user_id: int, amount: int = 1) -> dict | None:
         return await asyncio.to_thread(self._consume_credit_sync, user_id, amount)
 
     async def all_users(self) -> list[sqlite3.Row]:
         return await asyncio.to_thread(
             self._fetchall,
-            "SELECT user_id, username, first_name, banned, credit FROM users ORDER BY first_seen",
+            "SELECT user_id, username, first_name, banned, credit, free_credit FROM users ORDER BY first_seen",
         )
 
     # --- downloads -------------------------------------------------------

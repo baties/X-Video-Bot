@@ -6,10 +6,46 @@ YouTube, and Instagram, and sends them back in chat.
 ## Features
 
 - Inline platform menu (`/start`) + automatic URL detection
-- Non-blocking downloads (yt-dlp in a worker thread)
+- Non-blocking downloads (yt-dlp in a worker thread), global concurrency
+  limit + one-download-at-a-time per user
+- Videos over Telegram's 50 MB bot limit are auto-compressed with ffmpeg
+- Credit system: renewable free plan + purchased credits via Telegram Stars
+- SQLite persistence: users, bans, download history, payment transactions
+- Admin tools: stats, user list, ban/unban, direct message, broadcast,
+  manual credit, Stars refunds
 - YouTube bot-check mitigation: PO token provider, alternate player clients,
   optional cookies and proxy
 - Fully containerized — bot + PO token provider via docker compose
+
+## Credits & payments
+
+Every user has two credit pockets:
+
+| Pocket    | Amount                  | Expires?                              |
+|-----------|-------------------------|---------------------------------------|
+| Free      | `FREE_CREDITS` (5)      | Refills every `FREE_PERIOD_DAYS` (7)  |
+| Purchased | whatever the user buys  | Never                                 |
+
+- Download costs (per successful download): X = `CREDIT_COST_X`,
+  Instagram = `CREDIT_COST_INSTAGRAM`, YouTube = `CREDIT_COST_YOUTUBE`
+  (YouTube is priced higher to throttle the riskiest platform).
+- Free credits are spent first; purchased credits are only touched when
+  free runs out. Failed downloads never cost anything.
+- The free refill is a per-user rolling window (7 days from that user's
+  last refill), evaluated lazily — no scheduler needed.
+- Top-ups use Telegram Stars (`/buy`): packages come from `STAR_PACKAGES`
+  as `credits:stars` pairs. Every payment is stored in the `transactions`
+  table with its `charge_id`; `/refund <charge_id>` reverses a payment via
+  the Stars API and removes the purchased credits.
+- The admin (`ADMIN_ID`) is exempt from credits entirely.
+
+## Commands
+
+User: `/start` (platform menu), `/balance`, `/buy`, `/terms`,
+`/paysupport`, `/help`
+
+Admin: `/stats`, `/list`, `/credit <id> <amount>`, `/refund <charge_id>`,
+`/ban <id>`, `/unban <id>`, `/send <id> <msg>`, `/broadcast <msg>`
 
 ## Project structure
 
@@ -101,6 +137,15 @@ docker run -d -p 4416:4416 --restart unless-stopped \
 | `COOKIES_FILE`         | —       | Path to Netscape cookies.txt (optional)  |
 | `PROXY_URL`            | —       | Proxy for yt-dlp traffic (optional)      |
 | `POT_PROVIDER_URL`     | —       | bgutil PO token provider base URL        |
+| `ADMIN_ID`             | —       | Numeric Telegram ID of the admin         |
+| `DB_PATH`              | bot.db  | SQLite path (compose sets /data/bot.db)  |
+| `FREE_CREDITS`         | 5       | Free credits per refill period           |
+| `FREE_PERIOD_DAYS`     | 7       | Free refill period in days               |
+| `CREDIT_COST_X`        | 1       | Credits per X.com download               |
+| `CREDIT_COST_INSTAGRAM`| 1       | Credits per Instagram download           |
+| `CREDIT_COST_YOUTUBE`  | 3       | Credits per YouTube download             |
+| `MAX_CONCURRENT_DOWNLOADS` | 3   | Simultaneous downloads across all users  |
+| `STAR_PACKAGES`        | 5:25,15:70,40:170 | Stars packages, credits:stars  |
 
 ## Notes & limits
 
