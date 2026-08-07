@@ -37,8 +37,9 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     db: Database = context.bot_data["db"]
     s = await db.stats()
     rev = await db.revenue_stats()
+    vips = await db.vip_count()
     await update.message.reply_text(
-        f"Users: {s['users']} ({s['banned']} banned)\n"
+        f"Users: {s['users']} ({s['banned']} banned, {vips} VIP)\n"
         f"Downloads: {s['downloads_total']} total, {s['downloads_24h']} in last 24h\n"
         f"Payments: {rev['payments']} — {rev['stars']} ⭐ total"
     )
@@ -105,11 +106,21 @@ async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     for u in users:
         name = f"@{u['username']}" if u["username"] else (u["first_name"] or "-")
         flag = " [BANNED]" if u["banned"] else ""
+        import time as _t
+        now = int(_t.time())
+        is_vip = u["vip"] and (u["vip_until"] == 0 or u["vip_until"] > now)
+        vip_tag = " ⭐VIP" if is_vip else ""
         lines.append(
-            f"{u['user_id']}  {name}  free:{u['free_credit']} paid:{u['credit']}{flag}"
+            f"{u['user_id']}  {name}  free:{u['free_credit']} paid:{u['credit']}"
+            f"{vip_tag}{flag}"
         )
 
-    header = f"{len(users)} users:\n"
+    import time as _t
+    _now = int(_t.time())
+    n_vip = sum(
+        1 for u in users if u["vip"] and (u["vip_until"] == 0 or u["vip_until"] > _now)
+    )
+    header = f"{len(users)} users ({n_vip} VIP):\n"
     # Telegram messages cap at 4096 chars — send in chunks
     chunk = header
     for line in lines:
@@ -194,3 +205,58 @@ async def refund(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"Refunded {tx['stars']} ⭐ to {tx['user_id']}; removed {tx['credits']} "
         f"credits (balance now {new_balance})."
     )
+
+
+async def _resolve_user(db: Database, token: str):
+    """Resolve a user_id or @username to a user row's id, or None."""
+    if token.lstrip("-").isdigit():
+        return int(token)
+    row = await db.find_user_by_username(token)
+    return row["user_id"] if row else None
+
+
+@admin_only
+async def vip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if len(context.args) != 1:
+        await update.message.reply_text("Usage: /vip <user_id|@username>")
+        return
+    db: Database = context.bot_data["db"]
+    user_id = await _resolve_user(db, context.args[0])
+    if user_id is None or not await db.set_vip(user_id, True, until=0):
+        await update.message.reply_text("Unknown user.")
+        return
+    await update.message.reply_text(f"⭐ {user_id} is now a permanent VIP.")
+    try:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="⭐ You are now a VIP member: larger file limit and priority "
+                 "in the download queue.",
+        )
+    except Exception:
+        pass
+
+
+@admin_only
+async def unvip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if len(context.args) != 1:
+        await update.message.reply_text("Usage: /unvip <user_id|@username>")
+        return
+    db: Database = context.bot_data["db"]
+    user_id = await _resolve_user(db, context.args[0])
+    if user_id is None or not await db.set_vip(user_id, False):
+        await update.message.reply_text("Unknown user.")
+        return
+    await update.message.reply_text(f"{user_id} is no longer VIP.")
+
+
+@admin_only
+async def queue_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = context.bot_data["queue"]
+    s = q.snapshot()
+    lines = [
+        f"Active downloads: {s['active']}",
+        f"Waiting — VIP lane: {s['vip_waiting']}, normal lane: {s['normal_waiting']}",
+    ]
+    for uid, plat, prio in s["active_jobs"]:
+        lines.append(f"  ▶ {uid} — {plat}{' (VIP)' if prio else ''}")
+    await update.message.reply_text("\n".join(lines))

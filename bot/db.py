@@ -17,7 +17,9 @@ CREATE TABLE IF NOT EXISTS users (
     banned     INTEGER NOT NULL DEFAULT 0,
     credit     INTEGER NOT NULL DEFAULT 0,
     free_credit   INTEGER NOT NULL DEFAULT 0,
-    free_reset_at INTEGER NOT NULL DEFAULT 0
+    free_reset_at INTEGER NOT NULL DEFAULT 0,
+    vip           INTEGER NOT NULL DEFAULT 0,
+    vip_until     INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS downloads (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -58,6 +60,8 @@ class Database:
                 ("credit", "ALTER TABLE users ADD COLUMN credit INTEGER NOT NULL DEFAULT 0"),
                 ("free_credit", "ALTER TABLE users ADD COLUMN free_credit INTEGER NOT NULL DEFAULT 0"),
                 ("free_reset_at", "ALTER TABLE users ADD COLUMN free_reset_at INTEGER NOT NULL DEFAULT 0"),
+                ("vip", "ALTER TABLE users ADD COLUMN vip INTEGER NOT NULL DEFAULT 0"),
+                ("vip_until", "ALTER TABLE users ADD COLUMN vip_until INTEGER NOT NULL DEFAULT 0"),
             ]:
                 if col not in cols:
                     self._conn.execute(ddl)
@@ -228,9 +232,93 @@ class Database:
             self._fetchall,
             """SELECT user_id, username, first_name, banned, credit,
                       CASE WHEN ? >= free_reset_at + ?
-                           THEN ? ELSE free_credit END AS free_credit
+                           THEN ? ELSE free_credit END AS free_credit,
+                      vip, vip_until
                FROM users ORDER BY first_seen""",
             (now, self.free_period, self.free_credits),
+        )
+
+    async def vip_count(self) -> int:
+        now = int(time.time())
+        row = await asyncio.to_thread(
+            self._fetchone,
+            "SELECT COUNT(*) AS n FROM users WHERE vip = 1 AND (vip_until = 0 OR vip_until > ?)",
+            (now,),
+        )
+        return row["n"]
+
+    # --- VIP -------------------------------------------------------------
+
+    def _is_vip_sync(self, user_id: int) -> bool:
+        now = int(time.time())
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT vip, vip_until FROM users WHERE user_id = ?", (user_id,)
+            ).fetchone()
+            if not row or not row["vip"]:
+                return False
+            if row["vip_until"] and now > row["vip_until"]:  # expired -> lazily clear
+                self._conn.execute(
+                    "UPDATE users SET vip = 0, vip_until = 0 WHERE user_id = ?",
+                    (user_id,),
+                )
+                self._conn.commit()
+                return False
+            return True
+
+    async def is_vip(self, user_id: int) -> bool:
+        """VIP status with lazy expiry (vip_until = 0 means permanent)."""
+        return await asyncio.to_thread(self._is_vip_sync, user_id)
+
+    async def vip_until(self, user_id: int) -> int:
+        row = await asyncio.to_thread(
+            self._fetchone, "SELECT vip_until FROM users WHERE user_id = ?", (user_id,)
+        )
+        return row["vip_until"] if row else 0
+
+    async def set_vip(self, user_id: int, vip: bool, until: int = 0) -> bool:
+        """Grant/revoke VIP. until=0 means permanent. False if user unknown."""
+        row = await asyncio.to_thread(
+            self._fetchone, "SELECT 1 FROM users WHERE user_id = ?", (user_id,)
+        )
+        if not row:
+            return False
+        await asyncio.to_thread(
+            self._write,
+            "UPDATE users SET vip = ?, vip_until = ? WHERE user_id = ?",
+            (int(vip), until if vip else 0, user_id),
+        )
+        return True
+
+    def _extend_vip_sync(self, user_id: int, seconds: int) -> int | None:
+        now = int(time.time())
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT vip, vip_until FROM users WHERE user_id = ?", (user_id,)
+            ).fetchone()
+            if not row:
+                return None
+            if row["vip"] and row["vip_until"] == 0:
+                return 0  # already permanent — nothing to extend
+            base = max(now, row["vip_until"]) if row["vip"] else now
+            until = base + seconds
+            self._conn.execute(
+                "UPDATE users SET vip = 1, vip_until = ? WHERE user_id = ?",
+                (until, user_id),
+            )
+            self._conn.commit()
+            return until
+
+    async def extend_vip(self, user_id: int, seconds: int) -> int | None:
+        """Add paid VIP time (stacks on remaining time). Returns new expiry ts,
+        0 if the user is permanent VIP, None if unknown."""
+        return await asyncio.to_thread(self._extend_vip_sync, user_id, seconds)
+
+    async def find_user_by_username(self, username: str):
+        return await asyncio.to_thread(
+            self._fetchone,
+            "SELECT * FROM users WHERE LOWER(username) = LOWER(?)",
+            (username.lstrip("@"),),
         )
 
     # --- downloads -------------------------------------------------------

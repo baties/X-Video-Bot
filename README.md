@@ -10,6 +10,8 @@ YouTube, and Instagram, and sends them back in chat.
   limit + one-download-at-a-time per user
 - Videos over Telegram's 50 MB bot limit are auto-compressed with ffmpeg
 - Credit system: renewable free plan + purchased credits via Telegram Stars
+- VIP tier: larger file limit, queue priority — sold via Stars or granted by admin
+- Real download queue: priority lanes, /status position, /cancel while queued
 - SQLite persistence: users, bans, download history, payment transactions
 - Admin tools: stats, user list, ban/unban, direct message, broadcast,
   manual credit, Stars refunds
@@ -39,12 +41,40 @@ Every user has two credit pockets:
   the Stars API and removes the purchased credits.
 - The admin (`ADMIN_ID`) is exempt from credits entirely.
 
+## VIP tier
+
+- Granted permanently by the admin (`/vip <id|@username>`, revoke with
+  `/unvip`) or purchased for `VIP_DAYS` via `/buy` (`VIP_PRICE_STARS`);
+  repeat purchases stack remaining time.
+- Benefits: source-video limit of `VIP_SIZE_LIMIT_MB` (vs
+  `USER_SIZE_LIMIT_MB`) and the priority lane in the download queue.
+- VIP status is shown in `/start` and `/balance` (⭐), in `/list`, and
+  counted in `/stats`.
+
+## Download queue
+
+Downloads run through a queue consumed by `MAX_CONCURRENT_DOWNLOADS`
+workers. VIP/admin jobs go to the priority lane and are always served
+first. Users see their queue position when submitting, get notified when
+the download starts, and can `/status` (position) or `/cancel` (only while
+still queued — active downloads can't be cancelled). `/queue` gives the
+admin lane sizes and active jobs.
+
+## Size limits
+
+Source-video size is checked after download: normal users
+`USER_SIZE_LIMIT_MB` (50), VIP `VIP_SIZE_LIMIT_MB` (100), admin unlimited.
+Over-limit videos are rejected and never cost credits. Separately,
+Telegram bots can upload at most 50 MB, so anything between the Telegram
+cap and the user's limit is compressed with ffmpeg to fit.
+
 ## Commands
 
-User: `/start` (platform menu), `/balance`, `/buy`, `/terms`,
-`/paysupport`, `/help`
+User: `/start` (platform menu), `/balance`, `/status`, `/cancel`, `/buy`,
+`/terms`, `/paysupport`, `/help`
 
-Admin: `/stats`, `/list`, `/credit <id> <amount>`, `/refund <charge_id>`,
+Admin: `/stats`, `/list`, `/queue`, `/credit <id> <amount>`,
+`/vip <id|@username>`, `/unvip <id|@username>`, `/refund <charge_id>`,
 `/ban <id>`, `/unban <id>`, `/send <id> <msg>`, `/broadcast <msg>`
 
 ## Project structure
@@ -146,6 +176,10 @@ docker run -d -p 4416:4416 --restart unless-stopped \
 | `CREDIT_COST_YOUTUBE`  | 3       | Credits per YouTube download             |
 | `MAX_CONCURRENT_DOWNLOADS` | 3   | Simultaneous downloads across all users  |
 | `STAR_PACKAGES`        | 5:25,15:70,40:170 | Stars packages, credits:stars  |
+| `USER_SIZE_LIMIT_MB`   | 50      | Max source-video size, normal users      |
+| `VIP_SIZE_LIMIT_MB`    | 100     | Max source-video size, VIP users         |
+| `VIP_PRICE_STARS`      | 150     | VIP membership price (0 disables)        |
+| `VIP_DAYS`             | 30      | VIP membership duration per purchase     |
 
 ## Notes & limits
 

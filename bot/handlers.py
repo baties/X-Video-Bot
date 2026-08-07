@@ -1,16 +1,17 @@
 """Telegram update handlers."""
 
-import asyncio
 import logging
 import os
 import tempfile
+import time
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction
-from telegram.ext import ContextTypes
+from telegram.ext import Application, ContextTypes
 
 from .config import Settings
 from .db import Database
+from .queue import DownloadQueue, Job
 from .transcode import CompressionFailed, CompressionImpossible, compress_to_fit
 from .downloader import (
     PLATFORMS,
@@ -48,6 +49,20 @@ def _costs_line(settings: Settings) -> str:
     return "Credit cost per download — " + ", ".join(parts)
 
 
+def _is_admin(settings: Settings, user_id: int) -> bool:
+    return settings.admin_id is not None and user_id == settings.admin_id
+
+
+async def _vip_badge(db: Database, settings: Settings, user_id: int) -> str:
+    """'⭐ VIP' marker for the user's interface, empty string if not VIP."""
+    if not await db.is_vip(user_id):
+        return ""
+    until = await db.vip_until(user_id)
+    if until == 0:
+        return "⭐ VIP member\n"
+    return f"⭐ VIP member (until {time.strftime('%Y-%m-%d', time.gmtime(until))})\n"
+
+
 async def _register_and_check_ban(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """Record the user, notify the admin of new users; returns True if banned."""
     db: Database = context.bot_data["db"]
@@ -73,7 +88,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if await _register_and_check_ban(update, context):
         return
     settings: Settings = context.bot_data["settings"]
+    db: Database = context.bot_data["db"]
+    badge = await _vip_badge(db, settings, update.effective_user.id)
     await update.message.reply_text(
+        f"{badge}"
         "Pick a platform, then send me a link — or just send any supported link "
         "and I'll auto-detect it.\nOnly public posts are supported.\n\n"
         f"Free plan: {settings.free_credits} credits every "
@@ -99,22 +117,28 @@ async def select_platform(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 USER_HELP = (
     "Commands:\n"
     "/start — show the platform menu\n"
-    "/balance — show your remaining download credits\n"
-    "/buy — top up credits with Telegram Stars\n"
+    "/balance — credits and VIP status\n"
+    "/status — check your download in the queue\n"
+    "/cancel — cancel your queued download\n"
+    "/buy — credits and VIP membership (Telegram Stars)\n"
     "/terms — terms of service\n"
     "/paysupport — payment support\n"
     "/help — this message\n\n"
     "Just send a public X.com, YouTube, or Instagram link and I'll send the "
-    "video back. Videos over the size limit are compressed automatically.\n"
+    "video back.\n"
     "Only successful downloads cost credits; failures are free.\n"
     "Free credits refill periodically; purchased credits never expire.\n"
+    "VIP members can download larger files and get queue priority.\n"
 )
 
 ADMIN_HELP = (
     "\n\nAdmin commands:\n"
     "/stats — user & download statistics\n"
-    "/list — list all user IDs with credit\n"
+    "/list — list all users (credit + VIP)\n"
+    "/queue — download queue status\n"
     "/credit <user_id> <amount> — add credit (negative to remove)\n"
+    "/vip <user_id|@username> — grant permanent VIP\n"
+    "/unvip <user_id|@username> — revoke VIP\n"
     "/refund <charge_id> — refund a Stars payment and remove its credits\n"
     "/ban <user_id> — ban a user\n"
     "/unban <user_id> — lift a ban\n"
@@ -130,6 +154,8 @@ TERMS = (
     "• Credits are consumed only by successful downloads and do not expire.\n"
     "• Purchased credits are non-refundable once used; undelivered credits "
     "are refunded via /paysupport.\n"
+    "• VIP membership grants larger file limits and queue priority for its "
+    "duration.\n"
     "• No availability guarantee: source platforms change frequently and "
     "downloads may temporarily fail. Failed downloads never cost credits.\n"
     "• Abuse leads to a ban without refund."
@@ -142,14 +168,18 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings: Settings = context.bot_data["settings"]
     db: Database = context.bot_data["db"]
     user_id = update.effective_user.id
-    if settings.admin_id is not None and user_id == settings.admin_id:
+    if _is_admin(settings, user_id):
         await update.message.reply_text("You're the admin — unlimited downloads.")
         return
+    badge = await _vip_badge(db, settings, user_id)
+    size_mb = (settings.vip_size_limit if badge else settings.user_size_limit) // (1024 * 1024)
     bal = await db.get_balances(user_id)
     await update.message.reply_text(
+        f"{badge}"
         f"Free credits: {bal['free']} (refill to {settings.free_credits} "
         f"in {_fmt_duration(bal['reset_in'])})\n"
         f"Purchased credits: {bal['paid']} (never expire)\n"
+        f"Max video size: {size_mb} MB\n"
         f"{_costs_line(settings)}\nTop up with /buy."
     )
 
@@ -165,14 +195,56 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     settings: Settings = context.bot_data["settings"]
     text = USER_HELP + _costs_line(settings) + "."
-    if settings.admin_id and update.effective_user.id == settings.admin_id:
+    if _is_admin(settings, update.effective_user.id):
         text += ADMIN_HELP
     await update.message.reply_text(text)
+
+
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await _register_and_check_ban(update, context):
+        return
+    queue: DownloadQueue = context.bot_data["queue"]
+    job = queue.get_job(update.effective_user.id)
+    if job is None:
+        await update.message.reply_text("You have no download queued or running.")
+    elif job.state == "active":
+        await update.message.reply_text(
+            f"Your {job.platform.label} download is running right now."
+        )
+    else:
+        pos = queue.position(update.effective_user.id)
+        await update.message.reply_text(
+            f"Your {job.platform.label} download is queued — position {pos}. "
+            "/cancel to cancel it."
+        )
+
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await _register_and_check_ban(update, context):
+        return
+    queue: DownloadQueue = context.bot_data["queue"]
+    user_id = update.effective_user.id
+    job = queue.get_job(user_id)
+    if job is None:
+        await update.message.reply_text("You have no download queued.")
+        return
+    if job.state == "active":
+        await update.message.reply_text(
+            "Your download already started — it can't be cancelled anymore."
+        )
+        return
+    if queue.cancel(user_id):
+        try:
+            await job.status.edit_text("Cancelled.")
+        except Exception:
+            pass
+        await update.message.reply_text("Your queued download was cancelled.")
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings: Settings = context.bot_data["settings"]
     db: Database = context.bot_data["db"]
+    queue: DownloadQueue = context.bot_data["queue"]
 
     if await _register_and_check_ban(update, context):
         return  # banned users are silently ignored
@@ -187,7 +259,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     platform, url = detected
     user_id = update.effective_user.id
-    is_admin = settings.admin_id is not None and user_id == settings.admin_id
+    is_admin = _is_admin(settings, user_id)
+    is_vip = False if is_admin else await db.is_vip(user_id)
     cost = settings.cost_for(platform.key)
 
     if not is_admin:
@@ -201,11 +274,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             )
             return
 
-    # Per-user cooldown: one download at a time
-    active: set = context.bot_data.setdefault("active_downloads", set())
-    if user_id in active:
+    if queue.get_job(user_id) is not None:
         await update.message.reply_text(
-            "You already have a download in progress — wait for it to finish."
+            "You already have a download queued or running — /status to check, "
+            "/cancel to cancel a queued one."
         )
         return
 
@@ -217,122 +289,156 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
 
     await db.record_download(user_id, platform.key, url)
-    active.add(user_id)
+
+    if is_admin:
+        size_limit = None
+    elif is_vip:
+        size_limit = settings.vip_size_limit
+    else:
+        size_limit = settings.user_size_limit
+
+    status_msg = await update.message.reply_text("Queuing your download...")
+    job = Job(
+        user_id=user_id,
+        chat_id=update.effective_chat.id,
+        message=update.message,
+        status=status_msg,
+        platform=platform,
+        url=url,
+        cost=cost,
+        is_admin=is_admin,
+        is_vip=is_vip,
+        size_limit=size_limit,
+    )
+    pos = await queue.put(job)
+    if pos > 1:
+        lane = " (VIP priority)" if (is_vip or is_admin) else ""
+        await status_msg.edit_text(
+            f"Queued{lane} — position {pos}. I'll notify you when it starts.\n"
+            "/status to check, /cancel to cancel."
+        )
+    # If pos == 1 a worker will pick it up immediately and edit the status.
+
+
+async def process_job(app: Application, job: Job) -> None:
+    """Executed by a queue worker. Downloads, size-checks, compresses, sends."""
+    settings: Settings = app.bot_data["settings"]
+    db: Database = app.bot_data["db"]
+
+    # Notify: download started (no longer cancellable)
     try:
-        await _process_download(update, context, platform, url, cost, is_admin)
-    finally:
-        active.discard(user_id)
+        await job.status.edit_text(f"Your {job.platform.label} download started...")
+    except Exception:
+        pass
+    try:
+        await app.bot.send_chat_action(job.chat_id, ChatAction.UPLOAD_VIDEO)
+    except Exception:
+        pass
 
+    with tempfile.TemporaryDirectory() as tmpdir:
+        try:
+            result = await download_video(job.url, job.platform, tmpdir, settings)
+        except DownloadFailed as exc:
+            log.warning("Download failed for %s: %s", job.url, exc)
+            await job.status.edit_text(
+                "Couldn't download that. The post may be private, deleted, "
+                "age-restricted, or contain no video. (No credits were spent.)"
+            )
+            return
+        except NoVideoFound:
+            await job.status.edit_text("No video found at that link. (No credits were spent.)")
+            return
+        except Exception:
+            log.exception("Unexpected error for %s", job.url)
+            await job.status.edit_text(
+                "Something went wrong. Try again later. (No credits were spent.)"
+            )
+            return
 
-async def _process_download(update, context, platform, url, cost: int, is_admin: bool) -> None:
-    settings: Settings = context.bot_data["settings"]
-    db: Database = context.bot_data["db"]
-    user_id = update.effective_user.id
+        size_mb = result.size / (1024 * 1024)
 
-    status = await update.message.reply_text(f"Downloading from {platform.label}...")
+        # Per-tier source size limit (admin: unlimited)
+        if job.size_limit is not None and result.size > job.size_limit:
+            limit_mb = job.size_limit // (1024 * 1024)
+            extra = ""
+            if not job.is_vip:
+                vip_mb = settings.vip_size_limit // (1024 * 1024)
+                extra = f"\nVIP members can download up to {vip_mb} MB — see /buy."
+            await job.status.edit_text(
+                f"Video is {size_mb:.0f} MB — over your {limit_mb} MB limit. "
+                f"(No credits were spent.){extra}"
+            )
+            return
 
-    # Global concurrency guard: limit simultaneous yt-dlp/ffmpeg jobs
-    semaphore: asyncio.Semaphore = context.bot_data["dl_semaphore"]
-    if semaphore.locked():
-        await status.edit_text("Server is busy — you're in the queue, please wait...")
-    async with semaphore:
-        await status.edit_text(f"Downloading from {platform.label}...")
-        await update.effective_chat.send_action(ChatAction.UPLOAD_VIDEO)
+        filepath = result.filepath
+        method_note = ""
+        tg_limit = settings.max_file_size
+        tg_limit_mb = tg_limit // (1024 * 1024)
 
-        with tempfile.TemporaryDirectory() as tmpdir:
+        if result.size > tg_limit:
+            await job.status.edit_text(
+                f"Video is {size_mb:.0f} MB — over Telegram's {tg_limit_mb} MB bot "
+                "limit.\nCompressing with ffmpeg, this can take a few minutes..."
+            )
             try:
-                result = await download_video(url, platform, tmpdir, settings)
-            except DownloadFailed as exc:
-                log.warning("Download failed for %s: %s", url, exc)
-                await status.edit_text(
-                    "Couldn't download that. The post may be private, deleted, "
-                    "age-restricted, or contain no video. (No credits were spent.)"
+                filepath = await compress_to_fit(result.filepath, tg_limit)
+            except CompressionImpossible:
+                await job.status.edit_text(
+                    f"Video is {size_mb:.0f} MB and too long to compress under "
+                    f"{tg_limit_mb} MB at watchable quality. Can't send it. "
+                    "(No credits were spent.)"
                 )
                 return
-            except NoVideoFound:
-                await status.edit_text("No video found at that link. (No credits were spent.)")
-                return
-            except Exception:
-                log.exception("Unexpected error for %s", url)
-                await status.edit_text(
-                    "Something went wrong. Try again later. (No credits were spent.)"
+            except CompressionFailed as exc:
+                log.error("Compression failed for %s: %s", job.url, exc)
+                await job.status.edit_text(
+                    f"Video is {size_mb:.0f} MB and compression failed. "
+                    "Can't send it. (No credits were spent.)"
                 )
                 return
 
-            filepath = result.filepath
-            method_note = ""
-            limit_mb = settings.max_file_size // (1024 * 1024)
-            size_mb = result.size / (1024 * 1024)
-
-            if result.size > settings.max_file_size:
-                # Method 2: compress with ffmpeg to fit under the limit
-                await status.edit_text(
-                    f"Video is {size_mb:.0f} MB — over Telegram's {limit_mb} MB bot limit.\n"
-                    "Method 2: compressing with ffmpeg, this can take a few minutes..."
+            new_mb = os.path.getsize(filepath) / (1024 * 1024)
+            if os.path.getsize(filepath) > tg_limit:
+                await job.status.edit_text(
+                    f"Compressed to {new_mb:.0f} MB but still over the "
+                    f"{tg_limit_mb} MB limit. (No credits were spent.)"
                 )
-                try:
-                    filepath = await compress_to_fit(result.filepath, settings.max_file_size)
-                except CompressionImpossible:
-                    await status.edit_text(
-                        f"Video is {size_mb:.0f} MB and too long to compress under "
-                        f"{limit_mb} MB at watchable quality. Can't send it. "
-                        "(No credits were spent.)"
-                    )
-                    return
-                except CompressionFailed as exc:
-                    log.error("Compression failed for %s: %s", url, exc)
-                    await status.edit_text(
-                        f"Video is {size_mb:.0f} MB and compression failed. "
-                        "Can't send it. (No credits were spent.)"
-                    )
-                    return
+                return
+            method_note = f" (compressed {size_mb:.0f} → {new_mb:.0f} MB)"
+            await job.status.edit_text(f"Compressed to {new_mb:.0f} MB. Uploading...")
+        else:
+            await job.status.edit_text(f"Downloaded {size_mb:.1f} MB. Uploading...")
 
-                new_mb = os.path.getsize(filepath) / (1024 * 1024)
-                if os.path.getsize(filepath) > settings.max_file_size:
-                    await status.edit_text(
-                        f"Compressed to {new_mb:.0f} MB but still over the "
-                        f"{limit_mb} MB limit. (No credits were spent.)"
-                    )
-                    return
-                method_note = f" (compressed {size_mb:.0f} → {new_mb:.0f} MB)"
-                await status.edit_text(f"Compressed to {new_mb:.0f} MB. Uploading...")
-            else:
-                await status.edit_text(
-                    f"Downloaded {size_mb:.1f} MB (method 1: direct). Uploading..."
+        sent_ok = False
+        try:
+            with open(filepath, "rb") as fh:
+                await job.message.reply_video(
+                    video=fh,
+                    caption=(result.title + method_note)[:1024],
+                    supports_streaming=True,
                 )
-
-            sent_ok = False
+            await job.status.delete()
+            sent_ok = True
+        except Exception:
+            log.exception("reply_video failed for %s, retrying as document", job.url)
             try:
                 with open(filepath, "rb") as fh:
-                    await update.message.reply_video(
-                        video=fh,
-                        caption=(result.title + method_note)[:1024],
-                        supports_streaming=True,
-                    )
-                await status.delete()
+                    await job.message.reply_document(document=fh, caption=result.title)
+                await job.status.delete()
                 sent_ok = True
-            except Exception:
-                log.exception("reply_video failed for %s, retrying as document", url)
-                try:
-                    with open(filepath, "rb") as fh:
-                        await update.message.reply_document(
-                            document=fh, caption=result.title
-                        )
-                    await status.delete()
-                    sent_ok = True
-                except Exception as exc2:
-                    log.exception("reply_document also failed for %s", url)
-                    await status.edit_text(
-                        f"Downloaded, but upload to Telegram failed: {type(exc2).__name__} "
-                        "(No credits were spent.)"
-                    )
+            except Exception as exc2:
+                log.exception("reply_document also failed for %s", job.url)
+                await job.status.edit_text(
+                    f"Downloaded, but upload to Telegram failed: {type(exc2).__name__} "
+                    "(No credits were spent.)"
+                )
 
     # Only successful deliveries cost credits; the admin is exempt
-    if sent_ok and not is_admin:
-        remaining = await db.consume_credit(user_id, cost)
+    if sent_ok and not job.is_admin:
+        remaining = await db.consume_credit(job.user_id, job.cost)
         if remaining is not None and remaining["total"] <= 3:
-            bal = await db.get_balances(user_id)
-            await update.message.reply_text(
+            bal = await db.get_balances(job.user_id)
+            await job.message.reply_text(
                 f"Credits left: {remaining['total']} "
                 f"(free refill in {_fmt_duration(bal['reset_in'])}). "
                 "Top up anytime with /buy."

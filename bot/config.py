@@ -46,6 +46,14 @@ class Settings:
     # How many downloads may run at the same time across ALL users
     max_concurrent_downloads: int = int(os.getenv("MAX_CONCURRENT_DOWNLOADS", "3"))
 
+    # Source-video size limits (bytes). Admin is unlimited.
+    user_size_limit: int = int(os.getenv("USER_SIZE_LIMIT_MB", "50")) * 1024 * 1024
+    vip_size_limit: int = int(os.getenv("VIP_SIZE_LIMIT_MB", "100")) * 1024 * 1024
+
+    # VIP membership sold via Stars; 0 stars disables the product
+    vip_price_stars: int = int(os.getenv("VIP_PRICE_STARS", "150"))
+    vip_days: int = int(os.getenv("VIP_DAYS", "30"))
+
     # Telegram Stars packages: "credits:stars,credits:stars,..."
     star_packages: list = field(default_factory=lambda: _parse_packages(
         os.getenv("STAR_PACKAGES", "5:25,15:70,40:170")
