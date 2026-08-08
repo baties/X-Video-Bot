@@ -89,8 +89,8 @@ grep download_fail data/logs/events.log
 
 Important errors (unexpected download failures, repeated upload failures,
 worker crashes, unhandled exceptions) are also pushed to the admin in
-Telegram. The admin toggles these with `/notify`; the setting persists in
-the database.
+Telegram. The admin controls these with `/notify` (no argument shows state,
+`/notify on|off` sets it); the setting persists in the database.
 
 ## Support tickets
 
@@ -102,16 +102,17 @@ with `/close`, the admin with `/close <user_id>`.
 
 ## Broadcast opt-out
 
-Users control admin broadcasts with `/notifications` (on by default).
+Users control admin broadcasts with `/notifications` — no argument shows
+the current state, `/notifications on|off` sets it (on by default).
 `/broadcast` skips opted-out and banned users.
 
 ## Commands
 
 User: `/start` (platform menu), `/balance`, `/status`, `/cancel`, `/buy`,
-`/support <msg>`, `/close`, `/notifications`, `/terms`, `/paysupport`,
+`/support <msg>`, `/close`, `/notifications [on|off]`, `/terms`, `/paysupport`,
 `/help`
 
-Admin: `/stats`, `/list`, `/queue`, `/notify`, `/credit <id> <amount>`,
+Admin: `/stats`, `/list`, `/queue`, `/notify [on|off]`, `/credit <id> <amount>`,
 `/vip <id|@username>`, `/unvip <id|@username>`, `/refund <charge_id>`,
 `/ban <id>`, `/unban <id>`, `/send <id> <msg>`, `/close <id>`,
 `/broadcast <msg>`

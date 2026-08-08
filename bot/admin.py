@@ -117,9 +117,10 @@ async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         now = int(_t.time())
         is_vip = u["vip"] and (u["vip_until"] == 0 or u["vip_until"] > now)
         vip_tag = " ⭐VIP" if is_vip else ""
+        bc_tag = "" if u["broadcast_on"] else " 🔕"
         lines.append(
             f"{u['user_id']}  {name}  free:{u['free_credit']} paid:{u['credit']}"
-            f"{vip_tag}{flag}"
+            f"{vip_tag}{bc_tag}{flag}"
         )
 
     import time as _t
@@ -127,7 +128,10 @@ async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     n_vip = sum(
         1 for u in users if u["vip"] and (u["vip_until"] == 0 or u["vip_until"] > _now)
     )
-    header = f"{len(users)} users ({n_vip} VIP):\n"
+    n_muted = sum(1 for u in users if not u["broadcast_on"])
+    header = (
+        f"{len(users)} users ({n_vip} VIP, {n_muted} 🔕 broadcast off):\n"
+    )
     # Telegram messages cap at 4096 chars — send in chunks
     chunk = header
     for line in lines:
@@ -271,10 +275,24 @@ async def queue_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 @admin_only
 async def notify_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Toggle error notifications to the admin."""
+    """Show or set admin error notifications: /notify [on|off]."""
     db: Database = context.bot_data["db"]
-    new_state = "off" if await db.get_setting(NOTIFY_KEY, "on") == "on" else "on"
-    await db.set_setting(NOTIFY_KEY, new_state)
-    await update.message.reply_text(
-        f"Error notifications are now {new_state.upper()}. /notify to toggle."
-    )
+    current = await db.get_setting(NOTIFY_KEY, "on")
+
+    if not context.args:
+        await update.message.reply_text(
+            f"Error notifications: {current.upper()}\n"
+            "Use /notify on or /notify off to change it."
+        )
+        return
+
+    arg = context.args[0].strip().lower()
+    if arg not in ("on", "off"):
+        await update.message.reply_text("Usage: /notify on|off")
+        return
+    if arg == current:
+        await update.message.reply_text(f"Error notifications are already {arg.upper()}.")
+        return
+
+    await db.set_setting(NOTIFY_KEY, arg)
+    await update.message.reply_text(f"Error notifications are now {arg.upper()}.")

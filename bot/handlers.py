@@ -127,7 +127,7 @@ USER_HELP = (
     "/buy — credits and VIP membership (Telegram Stars)\n"
     "/support <message> — contact the admin (opens a support ticket)\n"
     "/close — close your support ticket\n"
-    "/notifications — turn broadcast messages on/off\n"
+    "/notifications [on|off] — show or set broadcast messages\n"
     "/terms — terms of service\n"
     "/paysupport — payment support\n"
     "/help — this message\n\n"
@@ -340,18 +340,42 @@ async def close_ticket(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def notifications(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """User toggle for receiving admin broadcast messages."""
+    """Show or set whether the user receives admin broadcast messages.
+
+    /notifications        -> show current state
+    /notifications on|off -> set it explicitly (no accidental flips)
+    """
     if await _register_and_check_ban(update, context):
         return
     db: Database = context.bot_data["db"]
     user_id = update.effective_user.id
-    new_state = not await db.get_broadcast_on(user_id)
+    current = await db.get_broadcast_on(user_id)
+
+    if not context.args:
+        await update.message.reply_text(
+            f"Broadcast messages: {'ON' if current else 'OFF'}\n"
+            "Use /notifications on or /notifications off to change it."
+        )
+        return
+
+    arg = context.args[0].strip().lower()
+    if arg not in ("on", "off"):
+        await update.message.reply_text("Usage: /notifications on|off")
+        return
+
+    new_state = arg == "on"
+    if new_state == current:
+        await update.message.reply_text(
+            f"Broadcast messages are already {'ON' if current else 'OFF'}."
+        )
+        return
+
     await db.set_broadcast_on(user_id, new_state)
     event("broadcast_toggle", user=user_id, on=new_state)
     await update.message.reply_text(
-        "Broadcast messages are now ON. Use /notifications again to turn them off."
+        "Broadcast messages are now ON — you'll receive admin announcements."
         if new_state else
-        "Broadcast messages are now OFF. Use /notifications again to turn them on."
+        "Broadcast messages are now OFF — you won't receive admin announcements."
     )
 
 

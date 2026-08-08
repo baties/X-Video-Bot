@@ -246,7 +246,7 @@ class Database:
             """SELECT user_id, username, first_name, banned, credit,
                       CASE WHEN ? >= free_reset_at + ?
                            THEN ? ELSE free_credit END AS free_credit,
-                      vip, vip_until
+                      vip, vip_until, broadcast_on
                FROM users ORDER BY first_seen""",
             (now, self.free_period, self.free_credits),
         )
