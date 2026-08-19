@@ -13,10 +13,12 @@ from telegram.ext import ContextTypes
 from .config import Settings
 from .db import Database
 from .logsetup import event
+from .ratelimit import check_cooldown
 
 log = logging.getLogger(__name__)
 
 PAYLOAD_PREFIX = "credits"
+INVOICE_COOLDOWN_SEC = 3  # blunt repeated-tap invoice spam
 
 
 async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -47,6 +49,11 @@ async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
+    if not check_cooldown(
+        context.bot_data, "buy_invoice", query.from_user.id, INVOICE_COOLDOWN_SEC
+    ):
+        await query.answer("Please wait a moment before trying again.")
+        return
     await query.answer()
 
     settings: Settings = context.bot_data["settings"]
@@ -74,6 +81,11 @@ async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def buyvip_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
+    if not check_cooldown(
+        context.bot_data, "buy_invoice", query.from_user.id, INVOICE_COOLDOWN_SEC
+    ):
+        await query.answer("Please wait a moment before trying again.")
+        return
     await query.answer()
     settings: Settings = context.bot_data["settings"]
     if settings.vip_price_stars <= 0:

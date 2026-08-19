@@ -6,6 +6,7 @@ import os
 import re
 from dataclasses import dataclass
 
+import httpx
 import yt_dlp
 
 from .config import Settings
@@ -164,3 +165,25 @@ async def download_video(
     return await asyncio.to_thread(
         _download_sync, url, platform, out_dir, settings, size_limit
     )
+
+
+async def wait_for_pot_provider(
+    url: str, timeout: float = 20.0, interval: float = 1.0
+) -> bool:
+    """Poll the PO token provider until it responds or timeout elapses.
+
+    Best-effort only: never raises. Returns whether it became reachable, so
+    the caller can log a warning but must still start the bot either way —
+    the provider container may just be slower to boot than the bot.
+    """
+    deadline = asyncio.get_event_loop().time() + timeout
+    async with httpx.AsyncClient(timeout=2.0) as client:
+        while True:
+            try:
+                await client.get(url)
+                return True
+            except httpx.HTTPError:
+                pass
+            if asyncio.get_event_loop().time() >= deadline:
+                return False
+            await asyncio.sleep(interval)

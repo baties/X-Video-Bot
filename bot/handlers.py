@@ -2,6 +2,7 @@
 
 import logging
 import os
+import shutil
 import tempfile
 import time
 
@@ -14,6 +15,7 @@ from .db import Database
 from .logsetup import event
 from .notify import notify_admin_error
 from .queue import DownloadQueue, Job
+from .ratelimit import check_cooldown
 from .transcode import CompressionFailed, CompressionImpossible, compress_to_fit
 from .downloader import (
     PLATFORMS,
@@ -27,6 +29,17 @@ from .downloader import (
 log = logging.getLogger(__name__)
 
 ANY_MODE = "any"
+SUPPORT_RELAY_COOLDOWN_SEC = 2  # blunt support-chat flooding
+
+# Dedicated, recognizable root for per-job temp dirs (see cleanup_stale_downloads).
+DOWNLOAD_TMP_ROOT = os.path.join(tempfile.gettempdir(), "xvideobot-downloads")
+
+
+def cleanup_stale_downloads() -> None:
+    """Wipe leftover per-job temp dirs from a previous run that was killed
+    mid-download (e.g. OOM). Safe to call at startup, before any job runs."""
+    shutil.rmtree(DOWNLOAD_TMP_ROOT, ignore_errors=True)
+    os.makedirs(DOWNLOAD_TMP_ROOT, exist_ok=True)
 
 
 def _fmt_duration(seconds: int) -> str:
@@ -290,6 +303,13 @@ async def support(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     ticket_id = await db.open_ticket(user_id)
     event("ticket_open", ticket=ticket_id, user=user_id)
     if text:
+        if not check_cooldown(
+            context.bot_data, "support_relay", user_id, SUPPORT_RELAY_COOLDOWN_SEC
+        ):
+            await update.message.reply_text(
+                "You're sending messages too fast — please wait a moment."
+            )
+            return
         ok = await _relay_to_admin(update, context, ticket_id, text)
         await update.message.reply_text(
             "Your message was sent to support. Any plain text you send now "
@@ -413,6 +433,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         # Open support ticket -> plain text goes to the admin
         ticket = await db.get_open_ticket(update.effective_user.id)
         if ticket is not None:
+            if not check_cooldown(
+                context.bot_data, "support_relay", update.effective_user.id,
+                SUPPORT_RELAY_COOLDOWN_SEC,
+            ):
+                await update.message.reply_text(
+                    "You're sending messages too fast — please wait a moment."
+                )
+                return
             ok = await _relay_to_admin(
                 update, context, ticket["id"], update.message.text or ""
             )
@@ -506,7 +534,7 @@ async def process_job(app: Application, job: Job) -> None:
     except Exception:
         pass
 
-    with tempfile.TemporaryDirectory() as tmpdir:
+    with tempfile.TemporaryDirectory(dir=DOWNLOAD_TMP_ROOT) as tmpdir:
         try:
             result = await download_video(
                 job.url, job.platform, tmpdir, settings, size_limit=job.size_limit

@@ -39,10 +39,12 @@ from bot.notify import notify_admin_error
 from bot.queue import DownloadQueue
 from bot.config import get_settings
 from bot.db import Database
+from bot.downloader import wait_for_pot_provider
 from bot.handlers import (
     balance,
     cancel,
     close_ticket,
+    cleanup_stale_downloads,
     notifications,
     support,
     error_handler,
@@ -83,11 +85,24 @@ async def _worker(app, worker_id: int) -> None:
 
 async def _post_init(app) -> None:
     settings = app.bot_data["settings"]
+    log = logging.getLogger(__name__)
+
+    cleanup_stale_downloads()
+
+    if settings.pot_provider_url:
+        ready = await wait_for_pot_provider(settings.pot_provider_url)
+        if ready:
+            log.info("PO token provider is up at %s", settings.pot_provider_url)
+        else:
+            log.warning(
+                "PO token provider not reachable yet at %s after startup wait — "
+                "early YouTube downloads may fail until it's ready",
+                settings.pot_provider_url,
+            )
+
     for i in range(settings.max_concurrent_downloads):
         app.create_task(_worker(app, i))
-    logging.getLogger(__name__).info(
-        "Started %d download workers", settings.max_concurrent_downloads
-    )
+    log.info("Started %d download workers", settings.max_concurrent_downloads)
 
 
 def main() -> None:
