@@ -19,6 +19,7 @@ from .downloader import (
     PLATFORMS,
     DownloadFailed,
     NoVideoFound,
+    VideoTooLarge,
     detect_platform,
     download_video,
 )
@@ -507,7 +508,21 @@ async def process_job(app: Application, job: Job) -> None:
 
     with tempfile.TemporaryDirectory() as tmpdir:
         try:
-            result = await download_video(job.url, job.platform, tmpdir, settings)
+            result = await download_video(
+                job.url, job.platform, tmpdir, settings, size_limit=job.size_limit
+            )
+        except VideoTooLarge as exc:
+            size_mb = exc.size / (1024 * 1024)
+            limit_mb = (job.size_limit or 0) // (1024 * 1024)
+            extra = ""
+            if not job.is_vip and not job.is_admin:
+                vip_mb = settings.vip_size_limit // (1024 * 1024)
+                extra = f"\nVIP members can download up to {vip_mb} MB — see /buy."
+            await job.status.edit_text(
+                f"Video is ~{size_mb:.0f} MB — over your {limit_mb} MB limit. "
+                f"(No credits were spent.){extra}"
+            )
+            return
         except DownloadFailed as exc:
             log.warning("Download failed for %s: %s", job.url, exc)
             event("download_fail", user=job.user_id, platform=job.platform.key,

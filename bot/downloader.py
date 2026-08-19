@@ -54,6 +54,15 @@ class NoVideoFound(Exception):
     """Raised when the post contains no downloadable video."""
 
 
+class VideoTooLarge(Exception):
+    """Raised when the source is known to exceed the caller's size limit
+    before any video bytes are downloaded."""
+
+    def __init__(self, size: int) -> None:
+        super().__init__(f"{size} bytes")
+        self.size = size
+
+
 @dataclass(frozen=True)
 class DownloadResult:
     filepath: str
@@ -89,6 +98,8 @@ def _build_ydl_opts(platform: Platform, out_dir: str, settings: Settings) -> dic
         "no_warnings": True,
         "noplaylist": True,
         "extractor_args": extractor_args,
+        # Bound every socket op so a stalled connection can't hang a worker forever
+        "socket_timeout": settings.download_timeout,
     }
     if settings.cookies_file:
         opts["cookiefile"] = settings.cookies_file
@@ -97,10 +108,28 @@ def _build_ydl_opts(platform: Platform, out_dir: str, settings: Settings) -> dic
     return opts
 
 
-def _download_sync(url: str, platform: Platform, out_dir: str, settings: Settings) -> DownloadResult:
+def _estimate_size(info: dict) -> int | None:
+    """Best-effort total byte size for the format(s) yt-dlp selected, or None
+    if the source doesn't report it (common for HLS/live and some formats)."""
+    formats = info.get("requested_formats")
+    if formats:
+        sizes = [f.get("filesize") or f.get("filesize_approx") for f in formats]
+        return sum(sizes) if all(sizes) else None
+    return info.get("filesize") or info.get("filesize_approx")
+
+
+def _download_sync(
+    url: str, platform: Platform, out_dir: str, settings: Settings, size_limit: int | None
+) -> DownloadResult:
     ydl_opts = _build_ydl_opts(platform, out_dir, settings)
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            if size_limit is not None:
+                # Probe metadata only, so oversized videos never cost bandwidth/time
+                probe = ydl.extract_info(url, download=False)
+                estimated = _estimate_size(probe)
+                if estimated is not None and estimated > size_limit:
+                    raise VideoTooLarge(estimated)
             info = ydl.extract_info(url, download=True)
             filepath = ydl.prepare_filename(info)
             # merge_output_format can change the extension
@@ -120,7 +149,18 @@ def _download_sync(url: str, platform: Platform, out_dir: str, settings: Setting
 
 
 async def download_video(
-    url: str, platform: Platform, out_dir: str, settings: Settings
+    url: str,
+    platform: Platform,
+    out_dir: str,
+    settings: Settings,
+    size_limit: int | None = None,
 ) -> DownloadResult:
-    """Download a video without blocking the event loop."""
-    return await asyncio.to_thread(_download_sync, url, platform, out_dir, settings)
+    """Download a video without blocking the event loop.
+
+    size_limit, if given, rejects known-oversized sources before downloading
+    (raises VideoTooLarge); it's a best-effort pre-check, not a guarantee —
+    the caller must still verify the final file size.
+    """
+    return await asyncio.to_thread(
+        _download_sync, url, platform, out_dir, settings, size_limit
+    )
