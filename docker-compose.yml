@@ -11,11 +11,10 @@ services:
       LOG_DIR: /data/logs
     volumes:
       - ./data:/data
+      # Uncomment to mount a cookies file (set COOKIES_FILE=/data/cookies.txt in .env)
+      # - ./cookies.txt:/data/cookies.txt:ro
     depends_on:
       - pot-provider
-    # Uncomment to mount a cookies file (set COOKIES_FILE=/data/cookies.txt in .env)
-    # volumes:
-    #   - ./cookies.txt:/data/cookies.txt:ro
 
   pot-provider:
     image: brainicism/bgutil-ytdlp-pot-provider:latest
