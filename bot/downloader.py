@@ -46,6 +46,12 @@ PLATFORMS: dict[str, Platform] = {
     ),
 }
 
+# Pseudo-platform for videos uploaded directly to the bot (skips yt-dlp entirely).
+# Its regex never matches real text, so detect_platform() can't pick it by accident.
+UPLOAD_PLATFORM = Platform(
+    key="upload", label="Uploaded video", url_re=re.compile(r"(?!)"), ydl_format="",
+)
+
 
 class DownloadFailed(Exception):
     """Raised when the video cannot be downloaded."""
@@ -69,6 +75,7 @@ class DownloadResult:
     filepath: str
     title: str
     size: int
+    duration: float | None = None  # seconds, when the source reports it
 
 
 def detect_platform(text: str) -> tuple[Platform, str] | None:
@@ -146,6 +153,7 @@ def _download_sync(
         filepath=filepath,
         title=(info.get("title") or "")[:1024],
         size=os.path.getsize(filepath),
+        duration=info.get("duration"),
     )
 
 

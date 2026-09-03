@@ -146,13 +146,21 @@ async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
     else:
         days = int(value)
         until = await db.extend_vip(user.id, days * 86400)
+        subtitle_balance = await db.add_subtitle_credit(
+            user.id, settings.vip_subtitle_credits
+        )
         if until == 0:
-            text = "Payment received — you already have permanent VIP!"
+            text = (
+                "Payment received — you already have permanent VIP! "
+                f"Added {settings.vip_subtitle_credits} subtitle credits "
+                f"(balance: {subtitle_balance})."
+            )
         else:
             import time as _t
             text = (f"⭐ Payment received — VIP active until "
                     f"{_t.strftime('%Y-%m-%d', _t.gmtime(until))}. "
-                    "Larger file limit + queue priority are live now.")
+                    "Larger file limit + queue priority + transcripts are live now. "
+                    f"Added {settings.vip_subtitle_credits} subtitle credits.")
         await update.message.reply_text(text)
         detail = f"bought VIP {days} days"
 

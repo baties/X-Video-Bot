@@ -21,6 +21,11 @@ class Job:
     size_limit: int | None  # bytes; None = unlimited (admin)
     enqueued_at: float = field(default_factory=time.time)
     state: str = "queued"   # queued | active | done | cancelled
+    # VIP transcript feature: target language code ("en"/"fr"/"fa"), or None
+    subtitle_lang: str | None = None
+    # Set for direct video uploads instead of a link (skips yt-dlp)
+    uploaded_file_id: str | None = None
+    upload_duration: float | None = None  # Telegram-reported duration, uploads only
 
 
 class DownloadQueue:

@@ -1,5 +1,6 @@
 """Telegram update handlers."""
 
+import asyncio
 import logging
 import os
 import shutil
@@ -16,10 +17,29 @@ from .logsetup import event
 from .notify import notify_admin_error
 from .queue import DownloadQueue, Job
 from .ratelimit import check_cooldown
-from .transcode import CompressionFailed, CompressionImpossible, compress_to_fit
+from .subtitles import (
+    LANGUAGES,
+    TranscriptFailed,
+    build_srt,
+    credit_cost,
+    normalize_lang,
+    to_ass_color,
+)
+from .transcode import (
+    AudioExtractFailed,
+    CompressionFailed,
+    CompressionImpossible,
+    SubtitleBurnFailed,
+    burn_subtitles,
+    compress_to_fit,
+    extract_audio,
+    probe_duration,
+)
 from .downloader import (
     PLATFORMS,
+    UPLOAD_PLATFORM,
     DownloadFailed,
+    DownloadResult,
     NoVideoFound,
     VideoTooLarge,
     detect_platform,
@@ -30,6 +50,8 @@ log = logging.getLogger(__name__)
 
 ANY_MODE = "any"
 SUPPORT_RELAY_COOLDOWN_SEC = 2  # blunt support-chat flooding
+# Telegram Bot API's getFile cap for the cloud API (no local Bot API server)
+MAX_TG_FETCH_SIZE = 20 * 1024 * 1024
 
 # Dedicated, recognizable root for per-job temp dirs (see cleanup_stale_downloads).
 DOWNLOAD_TMP_ROOT = os.path.join(tempfile.gettempdir(), "xvideobot-downloads")
@@ -132,6 +154,97 @@ async def select_platform(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.edit_message_text(f"{PLATFORMS[key].label} mode. Send me a link.")
 
 
+def _transcript_menu(current: str | None) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(
+            meta["label"] + (" ✅" if code == current else ""),
+            callback_data=f"transcript:{code}",
+        )]
+        for code, meta in LANGUAGES.items()
+    ]
+    rows.append([InlineKeyboardButton(
+        "Off" + (" ✅" if current is None else ""), callback_data="transcript:off",
+    )])
+    return InlineKeyboardMarkup(rows)
+
+
+async def _require_vip(update, context) -> bool:
+    """Reply + return True if the caller is neither VIP nor admin."""
+    settings: Settings = context.bot_data["settings"]
+    db: Database = context.bot_data["db"]
+    user_id = update.effective_user.id
+    if _is_admin(settings, user_id):
+        return False
+    if await db.is_vip(user_id):
+        return False
+    await update.message.reply_text(
+        "Synced video transcripts are a VIP feature. See /buy to upgrade."
+    )
+    return True
+
+
+async def transcript_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await _register_and_check_ban(update, context):
+        return
+    settings: Settings = context.bot_data["settings"]
+    db: Database = context.bot_data["db"]
+    user_id = update.effective_user.id
+
+    if not settings.subtitle_feature_enabled:
+        await update.message.reply_text(
+            "The transcript feature isn't configured on this bot yet."
+        )
+        return
+    if await _require_vip(update, context):
+        return
+
+    if context.args:
+        arg = context.args[0].strip().lower()
+        if arg == "off":
+            context.user_data["subtitle_lang"] = None
+        else:
+            code = normalize_lang(arg)
+            if code is None:
+                await update.message.reply_text(
+                    f"Usage: /transcript <{'|'.join(LANGUAGES)}|off>"
+                )
+                return
+            context.user_data["subtitle_lang"] = code
+
+    current = context.user_data.get("subtitle_lang")
+    label = LANGUAGES[current]["label"] if current else "Off"
+    is_admin = _is_admin(settings, user_id)
+    sub_bal_line = ""
+    if not is_admin:
+        sub_bal_line = f"\nSubtitle credits: {await db.get_subtitle_credit(user_id)}"
+    await update.message.reply_text(
+        f"Transcript mode: {label}\n"
+        "When on, every video you send (link or upload) comes back with "
+        f"synced captions burned in.{sub_bal_line}",
+        reply_markup=_transcript_menu(current),
+    )
+
+
+async def transcript_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    settings: Settings = context.bot_data["settings"]
+    db: Database = context.bot_data["db"]
+    user_id = query.from_user.id
+
+    if not (_is_admin(settings, user_id) or await db.is_vip(user_id)):
+        await query.edit_message_text(
+            "Synced video transcripts are a VIP feature. See /buy to upgrade."
+        )
+        return
+
+    key = query.data.split(":", 1)[1]
+    code = None if key == "off" else key
+    context.user_data["subtitle_lang"] = code
+    label = LANGUAGES[code]["label"] if code else "Off"
+    await query.edit_message_text(f"Transcript mode set to: {label}")
+
+
 USER_HELP = (
     "Commands:\n"
     "/start — show the platform menu\n"
@@ -139,6 +252,7 @@ USER_HELP = (
     "/status — check your download in the queue\n"
     "/cancel — cancel your queued download\n"
     "/buy — credits and VIP membership (Telegram Stars)\n"
+    "/transcript [en|fr|fa|off] — (VIP) attach synced captions to your videos\n"
     "/support <message> — contact the admin (opens a support ticket)\n"
     "/close — close your support ticket\n"
     "/notifications [on|off] — show or set broadcast messages\n"
@@ -149,7 +263,9 @@ USER_HELP = (
     "video back.\n"
     "Only successful downloads cost credits; failures are free.\n"
     "Free credits refill periodically; purchased credits never expire.\n"
-    "VIP members can download larger files and get queue priority.\n"
+    "VIP members can download larger files, get queue priority, upload videos "
+    "directly (up to 20 MB, a Telegram limit), and burn in English/French/"
+    "Persian captions with /transcript.\n"
 )
 
 ADMIN_HELP = (
@@ -159,8 +275,9 @@ ADMIN_HELP = (
     "/queue — download queue status\n"
     "/notify — turn admin error notifications on/off\n"
     "/close <user_id> — close a user's support ticket\n"
-    "/credit <user_id> <amount> — add credit (negative to remove)\n"
-    "/vip <user_id|@username> — grant permanent VIP\n"
+    "/credit <user_id> <amount> — add download credit (negative to remove)\n"
+    "/subcredit <user_id> <amount> — add subtitle credit (negative to remove)\n"
+    "/vip <user_id|@username> — grant permanent VIP (also grants subtitle credits)\n"
     "/unvip <user_id|@username> — revoke VIP\n"
     "/refund <charge_id> — refund a Stars payment and remove its credits\n"
     "/ban <user_id> — ban a user\n"
@@ -179,6 +296,9 @@ TERMS = (
     "are refunded via /paysupport.\n"
     "• VIP membership grants larger file limits and queue priority for its "
     "duration.\n"
+    "• VIP transcripts: captions are generated with an AI transcription/"
+    "translation service and may contain errors; subtitle credits are only "
+    "spent when captions are successfully attached.\n"
     "• No availability guarantee: source platforms change frequently and "
     "downloads may temporarily fail. Failed downloads never cost credits.\n"
     "• Abuse leads to a ban without refund."
@@ -197,11 +317,18 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     badge = await _vip_badge(db, settings, user_id)
     size_mb = (settings.vip_size_limit if badge else settings.user_size_limit) // (1024 * 1024)
     bal = await db.get_balances(user_id)
+    sub_line = ""
+    if badge and settings.subtitle_feature_enabled:
+        sub_line = (
+            f"Subtitle credits: {await db.get_subtitle_credit(user_id)} "
+            f"({settings.subtitle_credit_per_minute}/min of video) \u2014 /transcript\n"
+        )
     await update.message.reply_text(
         f"{badge}"
         f"Free credits: {bal['free']} (refill to {settings.free_credits} "
         f"in {_fmt_duration(bal['reset_in'])})\n"
         f"Purchased credits: {bal['paid']} (never expire)\n"
+        f"{sub_line}"
         f"Max video size: {size_mb} MB\n"
         f"{_costs_line(settings)}\nTop up with /buy."
     )
@@ -496,6 +623,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     else:
         size_limit = settings.user_size_limit
 
+    subtitle_lang = context.user_data.get("subtitle_lang") if (is_vip or is_admin) else None
+
     status_msg = await update.message.reply_text("Queuing your download...")
     job = Job(
         user_id=user_id,
@@ -508,6 +637,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         is_admin=is_admin,
         is_vip=is_vip,
         size_limit=size_limit,
+        subtitle_lang=subtitle_lang,
     )
     pos = await queue.put(job)
     if pos > 1:
@@ -519,8 +649,113 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # If pos == 1 a worker will pick it up immediately and edit the status.
 
 
+async def handle_video_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Direct video upload (not a link) — VIP/admin only, requires a
+    /transcript language to already be selected."""
+    settings: Settings = context.bot_data["settings"]
+    db: Database = context.bot_data["db"]
+    queue: DownloadQueue = context.bot_data["queue"]
+
+    if await _register_and_check_ban(update, context):
+        return
+
+    video = update.message.video or update.message.document
+    if video is None or not (video.mime_type or "").startswith("video/"):
+        return  # not actually a video (e.g. a PDF document) — ignore silently
+
+    user_id = update.effective_user.id
+    is_admin = _is_admin(settings, user_id)
+    is_vip = False if is_admin else await db.is_vip(user_id)
+
+    if not (is_admin or is_vip):
+        await update.message.reply_text(
+            "Uploading a video directly is a VIP feature — use /buy to upgrade, "
+            "or send a link instead."
+        )
+        return
+
+    subtitle_lang = context.user_data.get("subtitle_lang")
+    if not subtitle_lang:
+        await update.message.reply_text(
+            "Set a caption language first with /transcript, then resend the video "
+            "(uploads are only processed for the transcript feature)."
+        )
+        return
+    if not settings.subtitle_feature_enabled:
+        await update.message.reply_text(
+            "The transcript feature isn't configured on this bot yet."
+        )
+        return
+
+    if video.file_size and video.file_size > MAX_TG_FETCH_SIZE:
+        await update.message.reply_text(
+            f"That file is {video.file_size / (1024 * 1024):.0f} MB — Telegram only "
+            f"lets bots fetch uploaded files up to "
+            f"{MAX_TG_FETCH_SIZE // (1024 * 1024)} MB. Send a link instead, or "
+            "upload a smaller clip."
+        )
+        return
+
+    size_limit = None if is_admin else (
+        settings.vip_size_limit if is_vip else settings.user_size_limit
+    )
+    if size_limit is not None and video.file_size and video.file_size > size_limit:
+        limit_mb = size_limit // (1024 * 1024)
+        await update.message.reply_text(
+            f"Video is {video.file_size / (1024 * 1024):.0f} MB — over your "
+            f"{limit_mb} MB limit. (No credits were spent.)"
+        )
+        return
+
+    if queue.get_job(user_id) is not None:
+        await update.message.reply_text(
+            "You already have a download queued or running — /status to check, "
+            "/cancel to cancel a queued one."
+        )
+        return
+
+    await db.record_download(user_id, "upload", f"tg-file:{video.file_unique_id}")
+    event("download_request", user=user_id, platform="upload", vip=is_vip)
+
+    status_msg = await update.message.reply_text("Queuing your video...")
+    job = Job(
+        user_id=user_id,
+        chat_id=update.effective_chat.id,
+        message=update.message,
+        status=status_msg,
+        platform=UPLOAD_PLATFORM,
+        url="",
+        cost=0,  # uploads aren't a platform download; only subtitle credit applies
+        is_admin=is_admin,
+        is_vip=is_vip,
+        size_limit=size_limit,
+        subtitle_lang=subtitle_lang,
+        uploaded_file_id=video.file_id,
+        upload_duration=getattr(video, "duration", None),
+    )
+    pos = await queue.put(job)
+    if pos > 1:
+        await status_msg.edit_text(
+            f"Queued (VIP priority) — position {pos}. I'll notify you when it starts.\n"
+            "/status to check, /cancel to cancel."
+        )
+
+
+async def _fetch_uploaded_video(app: Application, job: Job, tmpdir: str) -> DownloadResult:
+    tg_file = await app.bot.get_file(job.uploaded_file_id)
+    local_path = os.path.join(tmpdir, f"{job.uploaded_file_id}.mp4")
+    await tg_file.download_to_drive(local_path)
+    return DownloadResult(
+        filepath=local_path,
+        title="Uploaded video",
+        size=os.path.getsize(local_path),
+        duration=job.upload_duration,
+    )
+
+
 async def process_job(app: Application, job: Job) -> None:
-    """Executed by a queue worker. Downloads, size-checks, compresses, sends."""
+    """Executed by a queue worker. Downloads/fetches, size-checks, optionally
+    attaches subtitles, compresses, sends."""
     settings: Settings = app.bot_data["settings"]
     db: Database = app.bot_data["db"]
 
@@ -535,49 +770,62 @@ async def process_job(app: Application, job: Job) -> None:
         pass
 
     with tempfile.TemporaryDirectory(dir=DOWNLOAD_TMP_ROOT) as tmpdir:
-        try:
-            result = await download_video(
-                job.url, job.platform, tmpdir, settings, size_limit=job.size_limit
-            )
-        except VideoTooLarge as exc:
-            size_mb = exc.size / (1024 * 1024)
-            limit_mb = (job.size_limit or 0) // (1024 * 1024)
-            extra = ""
-            if not job.is_vip and not job.is_admin:
-                vip_mb = settings.vip_size_limit // (1024 * 1024)
-                extra = f"\nVIP members can download up to {vip_mb} MB — see /buy."
-            await job.status.edit_text(
-                f"Video is ~{size_mb:.0f} MB — over your {limit_mb} MB limit. "
-                f"(No credits were spent.){extra}"
-            )
-            return
-        except DownloadFailed as exc:
-            log.warning("Download failed for %s: %s", job.url, exc)
-            event("download_fail", user=job.user_id, platform=job.platform.key,
-                  reason="download_error")
-            await job.status.edit_text(
-                "Couldn't download that. The post may be private, deleted, "
-                "age-restricted, or contain no video. (No credits were spent.)"
-            )
-            return
-        except NoVideoFound:
-            await job.status.edit_text("No video found at that link. (No credits were spent.)")
-            return
-        except Exception as exc:
-            log.exception("Unexpected error for %s", job.url)
-            event("download_fail", user=job.user_id, platform=job.platform.key,
-                  reason="unexpected")
-            await notify_admin_error(
-                app.bot, db, settings,
-                f"Unexpected download error for user {job.user_id} "
-                f"({job.platform.label}): {type(exc).__name__}: {exc}",
-            )
-            await job.status.edit_text(
-                "Something went wrong. Try again later. (No credits were spent.)"
-            )
-            return
+        if job.uploaded_file_id:
+            try:
+                result = await _fetch_uploaded_video(app, job, tmpdir)
+            except Exception as exc:
+                log.exception("Fetching uploaded file failed for user %s", job.user_id)
+                event("download_fail", user=job.user_id, platform=job.platform.key,
+                      reason="fetch_upload")
+                await job.status.edit_text(
+                    f"Couldn't fetch your upload: {type(exc).__name__}. "
+                    "(No credits were spent.)"
+                )
+                return
+        else:
+            try:
+                result = await download_video(
+                    job.url, job.platform, tmpdir, settings, size_limit=job.size_limit
+                )
+            except VideoTooLarge as exc:
+                size_mb = exc.size / (1024 * 1024)
+                limit_mb = (job.size_limit or 0) // (1024 * 1024)
+                extra = ""
+                if not job.is_vip and not job.is_admin:
+                    vip_mb = settings.vip_size_limit // (1024 * 1024)
+                    extra = f"\nVIP members can download up to {vip_mb} MB — see /buy."
+                await job.status.edit_text(
+                    f"Video is ~{size_mb:.0f} MB — over your {limit_mb} MB limit. "
+                    f"(No credits were spent.){extra}"
+                )
+                return
+            except DownloadFailed as exc:
+                log.warning("Download failed for %s: %s", job.url, exc)
+                event("download_fail", user=job.user_id, platform=job.platform.key,
+                      reason="download_error")
+                await job.status.edit_text(
+                    "Couldn't download that. The post may be private, deleted, "
+                    "age-restricted, or contain no video. (No credits were spent.)"
+                )
+                return
+            except NoVideoFound:
+                await job.status.edit_text("No video found at that link. (No credits were spent.)")
+                return
+            except Exception as exc:
+                log.exception("Unexpected error for %s", job.url)
+                event("download_fail", user=job.user_id, platform=job.platform.key,
+                      reason="unexpected")
+                await notify_admin_error(
+                    app.bot, db, settings,
+                    f"Unexpected download error for user {job.user_id} "
+                    f"({job.platform.label}): {type(exc).__name__}: {exc}",
+                )
+                await job.status.edit_text(
+                    "Something went wrong. Try again later. (No credits were spent.)"
+                )
+                return
 
-        size_mb = result.size / (1024 * 1024)
+        source_size_mb = result.size / (1024 * 1024)
 
         # Per-tier source size limit (admin: unlimited)
         if job.size_limit is not None and result.size > job.size_limit:
@@ -587,23 +835,93 @@ async def process_job(app: Application, job: Job) -> None:
                 vip_mb = settings.vip_size_limit // (1024 * 1024)
                 extra = f"\nVIP members can download up to {vip_mb} MB — see /buy."
             await job.status.edit_text(
-                f"Video is {size_mb:.0f} MB — over your {limit_mb} MB limit. "
+                f"Video is {source_size_mb:.0f} MB — over your {limit_mb} MB limit. "
                 f"(No credits were spent.){extra}"
             )
             return
 
         filepath = result.filepath
+        caption_suffix = ""
+        subtitle_cost = 0
+
+        if job.subtitle_lang:
+            duration = result.duration
+            if duration is None:
+                try:
+                    duration = await asyncio.to_thread(probe_duration, filepath)
+                except CompressionFailed:
+                    duration = None
+            if not duration or duration <= 0:
+                await job.status.edit_text(
+                    "Couldn't determine this video's duration, so I can't price "
+                    "the transcript. Video wasn't sent. (No credits were spent.)"
+                )
+                return
+
+            subtitle_cost = credit_cost(duration, settings.subtitle_credit_per_minute)
+            lang_label = LANGUAGES[job.subtitle_lang]["label"]
+            if not job.is_admin:
+                sub_balance = await db.get_subtitle_credit(job.user_id)
+                if sub_balance < subtitle_cost:
+                    await job.status.edit_text(
+                        f"Adding {lang_label} captions to this {duration / 60:.1f}-min "
+                        f"video costs {subtitle_cost} subtitle credit(s); you have "
+                        f"{sub_balance}. (No credits were spent.)"
+                    )
+                    return
+
+            await job.status.edit_text(
+                f"Transcribing ({lang_label})... this can take a while for longer videos."
+            )
+            audio_path = os.path.join(tmpdir, "audio.mp3")
+            try:
+                await extract_audio(filepath, audio_path)
+                srt_text = await build_srt(audio_path, job.subtitle_lang, settings)
+            except (AudioExtractFailed, TranscriptFailed) as exc:
+                log.warning("Transcript failed for user %s: %s", job.user_id, exc)
+                event("transcript_fail", user=job.user_id, reason=type(exc).__name__)
+                await job.status.edit_text(
+                    f"Couldn't create the transcript: {exc}\n"
+                    "Video wasn't sent. (No credits were spent.)"
+                )
+                return
+
+            srt_path = os.path.join(tmpdir, "subs.srt")
+            with open(srt_path, "w", encoding="utf-8") as fh:
+                fh.write(srt_text)
+
+            lang_meta = LANGUAGES[job.subtitle_lang]
+            burned_path = os.path.join(tmpdir, "burned.mp4")
+            try:
+                filepath = await burn_subtitles(
+                    filepath, srt_path, burned_path,
+                    lang_meta["font"], settings.subtitle_font_size,
+                    to_ass_color(settings.subtitle_font_color),
+                )
+            except SubtitleBurnFailed as exc:
+                log.error("Subtitle burn failed for user %s: %s", job.user_id, exc)
+                event("transcript_fail", user=job.user_id, reason="burn")
+                await job.status.edit_text(
+                    "Couldn't burn the captions into the video. Video wasn't sent. "
+                    "(No credits were spent.)"
+                )
+                return
+
+            caption_suffix = f" [{lang_label} captions]"
+
+        current_size = os.path.getsize(filepath)
+        size_mb = current_size / (1024 * 1024)
         method_note = ""
         tg_limit = settings.max_file_size
         tg_limit_mb = tg_limit // (1024 * 1024)
 
-        if result.size > tg_limit:
+        if current_size > tg_limit:
             await job.status.edit_text(
                 f"Video is {size_mb:.0f} MB — over Telegram's {tg_limit_mb} MB bot "
                 "limit.\nCompressing with ffmpeg, this can take a few minutes..."
             )
             try:
-                filepath = await compress_to_fit(result.filepath, tg_limit)
+                filepath = await compress_to_fit(filepath, tg_limit)
             except CompressionImpossible:
                 await job.status.edit_text(
                     f"Video is {size_mb:.0f} MB and too long to compress under "
@@ -629,14 +947,15 @@ async def process_job(app: Application, job: Job) -> None:
             method_note = f" (compressed {size_mb:.0f} → {new_mb:.0f} MB)"
             await job.status.edit_text(f"Compressed to {new_mb:.0f} MB. Uploading...")
         else:
-            await job.status.edit_text(f"Downloaded {size_mb:.1f} MB. Uploading...")
+            verb = "Processed" if job.uploaded_file_id else "Downloaded"
+            await job.status.edit_text(f"{verb} {size_mb:.1f} MB. Uploading...")
 
         sent_ok = False
         try:
             with open(filepath, "rb") as fh:
                 await job.message.reply_video(
                     video=fh,
-                    caption=(result.title + method_note)[:1024],
+                    caption=(result.title + method_note + caption_suffix)[:1024],
                     supports_streaming=True,
                 )
             await job.status.delete()
@@ -667,14 +986,19 @@ async def process_job(app: Application, job: Job) -> None:
 
     # Only successful deliveries cost credits; the admin is exempt
     if sent_ok and not job.is_admin:
-        remaining = await db.consume_credit(job.user_id, job.cost)
-        if remaining is not None and remaining["total"] <= 3:
-            bal = await db.get_balances(job.user_id)
-            await job.message.reply_text(
-                f"Credits left: {remaining['total']} "
-                f"(free refill in {_fmt_duration(bal['reset_in'])}). "
-                "Top up anytime with /buy."
-            )
+        if job.cost > 0:
+            remaining = await db.consume_credit(job.user_id, job.cost)
+            if remaining is not None and remaining["total"] <= 3:
+                bal = await db.get_balances(job.user_id)
+                await job.message.reply_text(
+                    f"Credits left: {remaining['total']} "
+                    f"(free refill in {_fmt_duration(bal['reset_in'])}). "
+                    "Top up anytime with /buy."
+                )
+        if subtitle_cost > 0:
+            sub_remaining = await db.consume_subtitle_credit(job.user_id, subtitle_cost)
+            if sub_remaining is not None:
+                await job.message.reply_text(f"Subtitle credits left: {sub_remaining}.")
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:

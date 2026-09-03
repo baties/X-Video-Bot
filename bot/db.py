@@ -20,7 +20,8 @@ CREATE TABLE IF NOT EXISTS users (
     free_reset_at INTEGER NOT NULL DEFAULT 0,
     vip           INTEGER NOT NULL DEFAULT 0,
     vip_until     INTEGER NOT NULL DEFAULT 0,
-    broadcast_on  INTEGER NOT NULL DEFAULT 1
+    broadcast_on  INTEGER NOT NULL DEFAULT 1,
+    subtitle_credit INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS downloads (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -75,6 +76,7 @@ class Database:
                 ("vip", "ALTER TABLE users ADD COLUMN vip INTEGER NOT NULL DEFAULT 0"),
                 ("vip_until", "ALTER TABLE users ADD COLUMN vip_until INTEGER NOT NULL DEFAULT 0"),
                 ("broadcast_on", "ALTER TABLE users ADD COLUMN broadcast_on INTEGER NOT NULL DEFAULT 1"),
+                ("subtitle_credit", "ALTER TABLE users ADD COLUMN subtitle_credit INTEGER NOT NULL DEFAULT 0"),
             ]:
                 if col not in cols:
                     self._conn.execute(ddl)
@@ -237,6 +239,54 @@ class Database:
     async def consume_credit(self, user_id: int, amount: int = 1) -> dict | None:
         return await asyncio.to_thread(self._consume_credit_sync, user_id, amount)
 
+    # --- subtitle credits (separate pocket, VIP transcript feature) ---------
+
+    def _add_subtitle_credit_sync(self, user_id: int, amount: int) -> int | None:
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE users SET subtitle_credit = MAX(0, subtitle_credit + ?) "
+                "WHERE user_id = ?",
+                (amount, user_id),
+            )
+            if cur.rowcount == 0:
+                return None
+            self._conn.commit()
+            return self._conn.execute(
+                "SELECT subtitle_credit FROM users WHERE user_id = ?", (user_id,)
+            ).fetchone()["subtitle_credit"]
+
+    async def add_subtitle_credit(self, user_id: int, amount: int) -> int | None:
+        """Add (or with negative amount, remove) subtitle credit. Floors at 0.
+        Returns the new balance, or None if the user is unknown."""
+        return await asyncio.to_thread(self._add_subtitle_credit_sync, user_id, amount)
+
+    def _consume_subtitle_credit_sync(self, user_id: int, amount: int) -> int | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT subtitle_credit FROM users WHERE user_id = ?", (user_id,)
+            ).fetchone()
+            if not row or row["subtitle_credit"] < amount:
+                return None
+            new_balance = row["subtitle_credit"] - amount
+            self._conn.execute(
+                "UPDATE users SET subtitle_credit = ? WHERE user_id = ?",
+                (new_balance, user_id),
+            )
+            self._conn.commit()
+            return new_balance
+
+    async def consume_subtitle_credit(self, user_id: int, amount: int) -> int | None:
+        """Spend `amount` subtitle credits. Returns the new balance, or None
+        if the user doesn't have enough."""
+        return await asyncio.to_thread(self._consume_subtitle_credit_sync, user_id, amount)
+
+    async def get_subtitle_credit(self, user_id: int) -> int:
+        row = await asyncio.to_thread(
+            self._fetchone,
+            "SELECT subtitle_credit FROM users WHERE user_id = ?", (user_id,),
+        )
+        return row["subtitle_credit"] if row else 0
+
     async def all_users(self) -> list[sqlite3.Row]:
         """All users, with free_credit shown as its EFFECTIVE value (i.e. what
         the lazy refill would grant on the user's next interaction)."""
@@ -246,7 +296,7 @@ class Database:
             """SELECT user_id, username, first_name, banned, credit,
                       CASE WHEN ? >= free_reset_at + ?
                            THEN ? ELSE free_credit END AS free_credit,
-                      vip, vip_until, broadcast_on
+                      vip, vip_until, broadcast_on, subtitle_credit
                FROM users ORDER BY first_seen""",
             (now, self.free_period, self.free_credits),
         )

@@ -21,6 +21,9 @@ YouTube, and Instagram, and sends them back in chat.
   manual credit, Stars refunds
 - YouTube bot-check mitigation: PO token provider, alternate player clients,
   optional cookies and proxy
+- VIP synced transcripts: select English, French, or Persian with `/transcript`,
+  then send a supported link or upload a video; captions are translated with
+  OpenAI and burned into the returned video
 - Fully containerized — bot + PO token provider via docker compose
 
 ## Credits & payments
@@ -54,6 +57,26 @@ Every user has two credit pockets:
   `USER_SIZE_LIMIT_MB`) and the priority lane in the download queue.
 - VIP status is shown in `/start` and `/balance` (⭐), in `/list`, and
   counted in `/stats`.
+
+## VIP transcripts
+
+Set `OPENAI_API_KEY` in `.env` and rebuild the container. The bot uses OpenAI
+Whisper segment timestamps and burns synchronized captions into the video with
+ffmpeg. Supported output languages are English (`en`), French (`fr`), and
+Persian/Farsi (`fa`). The Persian and Latin fonts are installed by the
+Dockerfile.
+
+Use `/transcript` to choose a language, then send a public X/YouTube/Instagram
+link or upload a video directly. Direct uploads are limited to 20 MB by
+Telegram's standard cloud Bot API; links use the existing VIP source limit.
+The returned file contains hardcoded captions, so the viewer does not need to
+enable a subtitle track. `SUBTITLE_FONT_SIZE` and `SUBTITLE_FONT_COLOR` control
+the administrator-defined burned-in appearance.
+
+Each VIP grant or paid VIP purchase adds `VIP_SUBTITLE_CREDITS`. A transcript
+costs `ceil(video_minutes * SUBTITLE_CREDIT_PER_MINUTE)` credits, with a
+minimum of one. Subtitle credits are separate from normal download credits,
+and are charged only after the captioned video is successfully delivered.
 
 ## Download queue
 
@@ -108,11 +131,12 @@ the current state, `/notifications on|off` sets it (on by default).
 
 ## Commands
 
-User: `/start` (platform menu), `/balance`, `/status`, `/cancel`, `/buy`,
+User: `/start` (platform menu), `/balance`, `/status`, `/cancel`, `/buy`, `/transcript`,
 `/support <msg>`, `/close`, `/notifications [on|off]`, `/terms`, `/paysupport`,
 `/help`
 
 Admin: `/stats`, `/list`, `/queue`, `/notify [on|off]`, `/credit <id> <amount>`,
+`/subcredit <id> <amount>`,
 `/vip <id|@username>`, `/unvip <id|@username>`, `/refund <charge_id>`,
 `/ban <id>`, `/unban <id>`, `/send <id> <msg>`, `/close <id>`,
 `/broadcast <msg>`
@@ -220,6 +244,13 @@ docker run -d -p 4416:4416 --restart unless-stopped \
 | `VIP_SIZE_LIMIT_MB`    | 100     | Max source-video size, VIP users         |
 | `VIP_PRICE_STARS`      | 150     | VIP membership price (0 disables)        |
 | `VIP_DAYS`             | 30      | VIP membership duration per purchase     |
+| `OPENAI_API_KEY`       | —       | Enables VIP transcript generation        |
+| `OPENAI_TRANSCRIBE_MODEL` | whisper-1 | Timestamped transcription model       |
+| `OPENAI_TRANSLATE_MODEL` | gpt-4o-mini | Translation model                      |
+| `SUBTITLE_CREDIT_PER_MINUTE` | 2   | Subtitle credits per video minute        |
+| `VIP_SUBTITLE_CREDITS` | 20      | Subtitle credits per VIP grant/purchase  |
+| `SUBTITLE_FONT_SIZE`   | 24      | Burned-in caption font size              |
+| `SUBTITLE_FONT_COLOR`  | white   | Burned-in caption name or #RRGGBB        |
 | `LOG_DIR`              | logs    | Log directory (compose: /data/logs)      |
 
 ## Notes & limits

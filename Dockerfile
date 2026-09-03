@@ -2,7 +2,7 @@ FROM python:3.12-slim
 
 # ffmpeg is required for merging YouTube video+audio streams
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg \
+    && apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core fonts-farsiweb \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

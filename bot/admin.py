@@ -116,7 +116,7 @@ async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         import time as _t
         now = int(_t.time())
         is_vip = u["vip"] and (u["vip_until"] == 0 or u["vip_until"] > now)
-        vip_tag = " ⭐VIP" if is_vip else ""
+        vip_tag = f" \u2b50VIP(sub:{u['subtitle_credit']})" if is_vip else ""
         bc_tag = "" if u["broadcast_on"] else " 🔕"
         lines.append(
             f"{u['user_id']}  {name}  free:{u['free_credit']} paid:{u['credit']}"
@@ -187,6 +187,32 @@ async def credit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 @admin_only
+async def subcredit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    args = context.args
+    if (
+        len(args) != 2
+        or not args[0].lstrip("-").isdigit()
+        or not args[1].lstrip("-").isdigit()
+    ):
+        await update.message.reply_text("Usage: /subcredit <user_id> <amount>")
+        return
+    user_id, amount = int(args[0]), int(args[1])
+    db: Database = context.bot_data["db"]
+    new_balance = await db.add_subtitle_credit(user_id, amount)
+    if new_balance is None:
+        await update.message.reply_text(f"Unknown user {user_id}.")
+        return
+    await update.message.reply_text(f"User {user_id} subtitle credit is now {new_balance}.")
+    try:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=f"Your subtitle credit balance is now {new_balance}. Use /transcript.",
+        )
+    except Exception:
+        pass  # user may have blocked the bot
+
+
+@admin_only
 async def refund(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if len(context.args) != 1:
         await update.message.reply_text("Usage: /refund <charge_id>")
@@ -231,17 +257,22 @@ async def vip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if len(context.args) != 1:
         await update.message.reply_text("Usage: /vip <user_id|@username>")
         return
+    settings: Settings = context.bot_data["settings"]
     db: Database = context.bot_data["db"]
     user_id = await _resolve_user(db, context.args[0])
     if user_id is None or not await db.set_vip(user_id, True, until=0):
         await update.message.reply_text("Unknown user.")
         return
-    await update.message.reply_text(f"⭐ {user_id} is now a permanent VIP.")
+    sub_balance = await db.add_subtitle_credit(user_id, settings.vip_subtitle_credits)
+    await update.message.reply_text(
+        f"⭐ {user_id} is now a permanent VIP "
+        f"(+{settings.vip_subtitle_credits} subtitle credits, now {sub_balance})."
+    )
     try:
         await context.bot.send_message(
             chat_id=user_id,
-            text="⭐ You are now a VIP member: larger file limit and priority "
-                 "in the download queue.",
+            text="⭐ You are now a VIP member: larger file limit, priority "
+                 "in the download queue, and video transcripts — see /transcript.",
         )
     except Exception:
         pass

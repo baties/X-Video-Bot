@@ -17,6 +17,7 @@ from bot.admin import (
     notify_toggle,
     broadcast,
     credit,
+    subcredit,
     list_users,
     queue_status,
     refund,
@@ -45,6 +46,7 @@ from bot.handlers import (
     cancel,
     close_ticket,
     cleanup_stale_downloads,
+    handle_video_upload,
     notifications,
     support,
     error_handler,
@@ -54,6 +56,8 @@ from bot.handlers import (
     select_platform,
     start,
     status,
+    transcript_callback,
+    transcript_command,
     terms,
 )
 
@@ -141,6 +145,7 @@ def main() -> None:
     app.add_handler(CommandHandler("close", close_ticket))
     app.add_handler(CommandHandler("notifications", notifications))
     app.add_handler(CommandHandler("buy", buy))
+    app.add_handler(CommandHandler("transcript", transcript_command))
     app.add_handler(CommandHandler("paysupport", paysupport))
     app.add_handler(CommandHandler("refund", refund))
     app.add_handler(CallbackQueryHandler(buy_callback, pattern=r"^buy:"))
@@ -148,6 +153,7 @@ def main() -> None:
     app.add_handler(PreCheckoutQueryHandler(precheckout))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
     app.add_handler(CommandHandler("credit", credit))
+    app.add_handler(CommandHandler("subcredit", subcredit))
     app.add_handler(CommandHandler("vip", vip))
     app.add_handler(CommandHandler("unvip", unvip))
     app.add_handler(CommandHandler("queue", queue_status))
@@ -159,6 +165,8 @@ def main() -> None:
     app.add_handler(CommandHandler("unban", unban))
     app.add_handler(CommandHandler("broadcast", broadcast))
     app.add_handler(CallbackQueryHandler(select_platform, pattern=r"^platform:"))
+    app.add_handler(CallbackQueryHandler(transcript_callback, pattern=r"^transcript:"))
+    app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video_upload))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)
 

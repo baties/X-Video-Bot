@@ -60,6 +60,27 @@ class Settings:
         os.getenv("STAR_PACKAGES", "5:25,15:70,40:170")
     ))
 
+    # --- VIP transcript/subtitle feature (OpenAI) ---
+    openai_api_key: str | None = os.getenv("OPENAI_API_KEY") or None
+    # NOTE: only whisper-1 returns segment-level timestamps (verbose_json),
+    # which synced subtitles require. Newer gpt-4o-transcribe models don't.
+    openai_transcribe_model: str = os.getenv("OPENAI_TRANSCRIBE_MODEL", "whisper-1")
+    openai_translate_model: str = os.getenv("OPENAI_TRANSLATE_MODEL", "gpt-4o-mini")
+
+    # Subtitle credits are a separate pocket from download credits (transcription
+    # costs real OpenAI money). Cost per job = ceil(video_minutes * this rate).
+    subtitle_credit_per_minute: int = int(os.getenv("SUBTITLE_CREDIT_PER_MINUTE", "2"))
+    # Granted once each time a user becomes/renews VIP (admin grant or Stars purchase)
+    vip_subtitle_credits: int = int(os.getenv("VIP_SUBTITLE_CREDITS", "20"))
+
+    # Burned-in subtitle styling (admin-controlled, not user-configurable)
+    subtitle_font_size: int = int(os.getenv("SUBTITLE_FONT_SIZE", "24"))
+    subtitle_font_color: str = os.getenv("SUBTITLE_FONT_COLOR", "white")
+
+    @property
+    def subtitle_feature_enabled(self) -> bool:
+        return self.openai_api_key is not None
+
     def cost_for(self, platform_key: str) -> int:
         return self.credit_costs.get(platform_key, 1)
 
