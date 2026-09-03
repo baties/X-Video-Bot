@@ -116,10 +116,11 @@ async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         import time as _t
         now = int(_t.time())
         is_vip = u["vip"] and (u["vip_until"] == 0 or u["vip_until"] > now)
-        vip_tag = f" \u2b50VIP(sub:{u['subtitle_credit']})" if is_vip else ""
+        vip_tag = " \u2b50VIP" if is_vip else ""
         bc_tag = "" if u["broadcast_on"] else " 🔕"
         lines.append(
-            f"{u['user_id']}  {name}  free:{u['free_credit']} paid:{u['credit']}"
+            f"{u['user_id']}  {name}  download:free={u['free_credit']} "
+            f"paid={u['credit']} subtitle={u['subtitle_credit']}"
             f"{vip_tag}{bc_tag}{flag}"
         )
 

@@ -57,6 +57,8 @@ Every user has two credit pockets:
   `USER_SIZE_LIMIT_MB`) and the priority lane in the download queue.
 - VIP status is shown in `/start` and `/balance` (⭐), in `/list`, and
   counted in `/stats`.
+- `/list` shows each user's download-credit pockets (`free` and `paid`) and
+  subtitle-credit balance; `/subcredit <id> <amount>` adjusts subtitle credits.
 
 ## VIP transcripts
 
@@ -147,7 +149,9 @@ Admin: `/stats`, `/list`, `/queue`, `/notify [on|off]`, `/credit <id> <amount>`,
 main.py             # entry point, wiring only
 bot/config.py       # settings loaded from .env
 bot/downloader.py   # platform registry + yt-dlp wrapper
-bot/handlers.py     # Telegram handlers
+bot/handlers.py     # Telegram handlers and download/transcript pipeline
+bot/subtitles.py    # OpenAI transcription/translation and SRT generation
+bot/transcode.py    # ffmpeg compression, audio extraction, and subtitle burn-in
 Dockerfile
 docker-compose.yml  # bot + bgutil PO token provider
 ```
@@ -257,6 +261,9 @@ docker run -d -p 4416:4416 --restart unless-stopped \
 
 - Telegram bots can't upload files over **50 MB** (a local Bot API server
   raises this to 2 GB if you ever need it).
+- With the standard Telegram cloud Bot API, bots can fetch user-uploaded files
+  only up to **20 MB**. Direct-upload transcript jobs above that size require a
+  smaller file or a link to the video.
 - Only public posts work. Private/protected content fails with a clear message.
 - Downloading may violate the platforms' terms of service — use responsibly
   and only for content you have the right to save.
