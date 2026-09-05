@@ -47,6 +47,7 @@ from bot.handlers import (
     close_ticket,
     cleanup_stale_downloads,
     handle_video_upload,
+    main_menu_action,
     notifications,
     support,
     error_handler,
@@ -167,6 +168,10 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(select_platform, pattern=r"^platform:"))
     app.add_handler(CallbackQueryHandler(transcript_callback, pattern=r"^transcript:"))
     app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video_upload))
+    app.add_handler(MessageHandler(
+        filters.TEXT & filters.Regex(r"^(?:Download Video|Balance|Status|Cancel|Buy Credits|Transcripts|Terms|Help)$"),
+        main_menu_action,
+    ))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)
 

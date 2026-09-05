@@ -7,7 +7,13 @@ import shutil
 import tempfile
 import time
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    Update,
+)
 from telegram.constants import ChatAction
 from telegram.ext import Application, ContextTypes
 
@@ -53,6 +59,25 @@ SUPPORT_RELAY_COOLDOWN_SEC = 2  # blunt support-chat flooding
 # Telegram Bot API's getFile cap for the cloud API (no local Bot API server)
 MAX_TG_FETCH_SIZE = 20 * 1024 * 1024
 
+MENU_DOWNLOAD = "Download Video"
+MENU_BALANCE = "Balance"
+MENU_STATUS = "Status"
+MENU_CANCEL = "Cancel"
+MENU_BUY = "Buy Credits"
+MENU_TRANSCRIPTS = "Transcripts"
+MENU_TERMS = "Terms"
+MENU_HELP = "Help"
+MENU_BUTTONS = {
+    MENU_DOWNLOAD,
+    MENU_BALANCE,
+    MENU_STATUS,
+    MENU_CANCEL,
+    MENU_BUY,
+    MENU_TRANSCRIPTS,
+    MENU_TERMS,
+    MENU_HELP,
+}
+
 # Dedicated, recognizable root for per-job temp dirs (see cleanup_stale_downloads).
 DOWNLOAD_TMP_ROOT = os.path.join(tempfile.gettempdir(), "xvideobot-downloads")
 
@@ -80,6 +105,21 @@ def _menu() -> InlineKeyboardMarkup:
     ]
     rows.append([InlineKeyboardButton("Any (auto-detect)", callback_data=f"platform:{ANY_MODE}")])
     return InlineKeyboardMarkup(rows)
+
+
+def _main_menu() -> ReplyKeyboardMarkup:
+    """Return the persistent keyboard for no-argument user actions."""
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton(MENU_DOWNLOAD), KeyboardButton(MENU_BALANCE)],
+            [KeyboardButton(MENU_STATUS), KeyboardButton(MENU_CANCEL)],
+            [KeyboardButton(MENU_BUY), KeyboardButton(MENU_TRANSCRIPTS)],
+            [KeyboardButton(MENU_TERMS), KeyboardButton(MENU_HELP)],
+        ],
+        resize_keyboard=True,
+        is_persistent=True,
+        input_field_placeholder="Send a video link or choose an action",
+    )
 
 
 def _costs_line(settings: Settings) -> str:
@@ -139,6 +179,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Need more? Top up with /buy — purchased credits never expire.",
         reply_markup=_menu(),
     )
+    await update.message.reply_text(
+        "Your main menu is ready below.", reply_markup=_main_menu()
+    )
+
+
+async def main_menu_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Route a persistent main-menu button to its existing command handler."""
+    actions = {
+        MENU_DOWNLOAD: start,
+        MENU_BALANCE: balance,
+        MENU_STATUS: status,
+        MENU_CANCEL: cancel,
+        MENU_BUY: buy,
+        MENU_TRANSCRIPTS: transcript_command,
+        MENU_TERMS: terms,
+        MENU_HELP: help_command,
+    }
+    action = actions.get(update.message.text)
+    if action is not None:
+        await action(update, context)
 
 
 async def select_platform(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
