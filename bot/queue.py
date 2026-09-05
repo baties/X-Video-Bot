@@ -25,6 +25,7 @@ class Job:
     subtitle_lang: str | None = None
     # Set for direct video uploads instead of a link (skips yt-dlp)
     uploaded_file_id: str | None = None
+    uploaded_filename: str | None = None
     upload_duration: float | None = None  # Telegram-reported duration, uploads only
 
 

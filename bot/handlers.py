@@ -21,6 +21,7 @@ from .config import Settings
 from .db import Database
 from .logsetup import event
 from .notify import notify_admin_error
+from .payments import buy
 from .queue import DownloadQueue, Job
 from .ratelimit import check_cooldown
 from .subtitles import (
@@ -279,8 +280,8 @@ async def transcript_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         sub_bal_line = f"\nSubtitle credits: {await db.get_subtitle_credit(user_id)}"
     await update.message.reply_text(
         f"Transcript mode: {label}\n"
-        "When on, every video you send (link or upload) comes back with "
-        f"synced captions burned in.{sub_bal_line}",
+        "When on, your next video (link or upload) comes back with synced "
+        f"captions burned in. It turns off automatically after delivery.{sub_bal_line}",
         reply_markup=_transcript_menu(current),
     )
 
@@ -312,7 +313,7 @@ USER_HELP = (
     "/status — check your download in the queue\n"
     "/cancel — cancel your queued download\n"
     "/buy — credits and VIP membership (Telegram Stars)\n"
-    "/transcript [en|fr|fa|off] — (VIP) attach synced captions to your videos\n"
+    "/transcript [en|fr|fa|off] — (VIP) attach synced captions to your next video\n"
     "/support <message> — contact the admin (opens a support ticket)\n"
     "/close — close your support ticket\n"
     "/notifications [on|off] — show or set broadcast messages\n"
@@ -791,6 +792,7 @@ async def handle_video_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
         size_limit=size_limit,
         subtitle_lang=subtitle_lang,
         uploaded_file_id=video.file_id,
+        uploaded_filename=video.file_name,
         upload_duration=getattr(video, "duration", None),
     )
     pos = await queue.put(job)
@@ -803,7 +805,8 @@ async def handle_video_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def _fetch_uploaded_video(app: Application, job: Job, tmpdir: str) -> DownloadResult:
     tg_file = await app.bot.get_file(job.uploaded_file_id)
-    local_path = os.path.join(tmpdir, f"{job.uploaded_file_id}.mp4")
+    filename = os.path.basename(job.uploaded_filename or "") or f"{job.uploaded_file_id}.mp4"
+    local_path = os.path.join(tmpdir, filename)
     await tg_file.download_to_drive(local_path)
     return DownloadResult(
         filepath=local_path,
@@ -900,7 +903,9 @@ async def process_job(app: Application, job: Job) -> None:
             )
             return
 
-        filepath = result.filepath
+        original_filepath = result.filepath
+        original_filename = os.path.basename(original_filepath)
+        filepath = original_filepath
         caption_suffix = ""
         subtitle_cost = 0
 
@@ -951,7 +956,7 @@ async def process_job(app: Application, job: Job) -> None:
                 fh.write(srt_text)
 
             lang_meta = LANGUAGES[job.subtitle_lang]
-            burned_path = os.path.join(tmpdir, "burned.mp4")
+            burned_path = os.path.join(tmpdir, "captioned.mp4")
             try:
                 filepath = await burn_subtitles(
                     filepath, srt_path, burned_path,
@@ -1010,6 +1015,13 @@ async def process_job(app: Application, job: Job) -> None:
             verb = "Processed" if job.uploaded_file_id else "Downloaded"
             await job.status.edit_text(f"{verb} {size_mb:.1f} MB. Uploading...")
 
+        # Intermediates are deliberately named captioned/compressed; restore the
+        # source basename before Telegram reads the file object's filename.
+        if filepath != original_filepath:
+            delivered_path = os.path.join(tmpdir, original_filename)
+            os.replace(filepath, delivered_path)
+            filepath = delivered_path
+
         sent_ok = False
         try:
             with open(filepath, "rb") as fh:
@@ -1043,6 +1055,12 @@ async def process_job(app: Application, job: Job) -> None:
 
     if sent_ok:
         event("download_ok", user=job.user_id, platform=job.platform.key)
+        if job.subtitle_lang:
+            app.user_data[job.user_id].pop("subtitle_lang", None)
+            await job.message.reply_text(
+                "Transcript mode is now off. Use /transcript before another "
+                "video when you want captions again."
+            )
 
     # Only successful deliveries cost credits; the admin is exempt
     if sent_ok and not job.is_admin:

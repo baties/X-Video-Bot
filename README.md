@@ -69,11 +69,13 @@ ffmpeg. Supported output languages are English (`en`), French (`fr`), and
 Persian/Farsi (`fa`). The Persian and Latin fonts are installed by the
 Dockerfile.
 
-Use `/transcript` to choose a language, then send a public X/YouTube/Instagram
-link or upload a video directly. Direct uploads are limited to 20 MB by
+Use `/transcript` to choose a language, then send one public X/YouTube/Instagram
+link or upload one video directly. The selection is automatically turned off
+after that captioned video is successfully delivered, so later videos are not
+captioned unless the user chooses `/transcript` again. Direct uploads are limited to 20 MB by
 Telegram's standard cloud Bot API; links use the existing VIP source limit.
 The returned file contains hardcoded captions, so the viewer does not need to
-enable a subtitle track. `SUBTITLE_FONT_SIZE` and `SUBTITLE_FONT_COLOR` control
+enable a subtitle track, and keeps the source video filename. `SUBTITLE_FONT_SIZE` and `SUBTITLE_FONT_COLOR` control
 the administrator-defined burned-in appearance.
 
 Each VIP grant or paid VIP purchase adds `VIP_SUBTITLE_CREDITS`. A transcript
