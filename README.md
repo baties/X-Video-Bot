@@ -5,8 +5,8 @@ YouTube, and Instagram, and sends them back in chat.
 
 ## Features
 
-- Persistent main menu for common no-argument actions, plus an inline platform
-  menu (`/start`) and automatic URL detection
+- User-toggleable main menu for common no-argument actions, plus an inline
+  platform menu (`/start`) and automatic URL detection
 - Non-blocking downloads (yt-dlp in a worker thread), global concurrency
   limit + one-download-at-a-time per user
 - Videos over Telegram's 50 MB bot limit are auto-compressed with ffmpeg
@@ -140,9 +140,10 @@ User: `/start` (platform menu), `/balance`, `/status`, `/cancel`, `/buy`, `/tran
 `/support <msg>`, `/close`, `/notifications [on|off]`, `/terms`, `/paysupport`,
 `/help`
 
-The persistent reply keyboard shown by `/start` provides buttons for Download
-Video, Balance, Status, Cancel, Buy Credits, Transcripts, Terms, and Help.
-Send a video link normally; the keyboard stays available while typing.
+The reply keyboard shown by `/start` provides buttons for Download Video,
+Balance, Status, Cancel, Buy Credits, Transcripts, Terms, and Help. Use
+Telegram's keyboard-toggle button beside the message field to show or hide it;
+the menu does not stay expanded while typing a video link.
 
 Admin: `/stats`, `/list`, `/queue`, `/notify [on|off]`, `/credit <id> <amount>`,
 `/subcredit <id> <amount>`,

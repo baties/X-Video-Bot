@@ -109,7 +109,7 @@ def _menu() -> InlineKeyboardMarkup:
 
 
 def _main_menu() -> ReplyKeyboardMarkup:
-    """Return the persistent keyboard for no-argument user actions."""
+    """Return a user-toggleable keyboard for no-argument user actions."""
     return ReplyKeyboardMarkup(
         [
             [KeyboardButton(MENU_DOWNLOAD), KeyboardButton(MENU_BALANCE)],
@@ -118,7 +118,7 @@ def _main_menu() -> ReplyKeyboardMarkup:
             [KeyboardButton(MENU_TERMS), KeyboardButton(MENU_HELP)],
         ],
         resize_keyboard=True,
-        is_persistent=True,
+        is_persistent=False,
         input_field_placeholder="Send a video link or choose an action",
     )
 
@@ -181,12 +181,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         reply_markup=_menu(),
     )
     await update.message.reply_text(
-        "Your main menu is ready below.", reply_markup=_main_menu()
+        "Use the keyboard button beside the message field to show or hide the main menu.",
+        reply_markup=_main_menu(),
     )
 
 
 async def main_menu_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Route a persistent main-menu button to its existing command handler."""
+    """Route a main-menu button to its existing command handler."""
     actions = {
         MENU_DOWNLOAD: start,
         MENU_BALANCE: balance,
